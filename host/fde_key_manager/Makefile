@@ -24,9 +24,11 @@ READELF		?= $(CROSS_COMPILE)readelf
 srcs		:= fde_key_manager_ca.c base64.c
 srcs_key	:= $(srcs) fde_key_manager.c
 srcs_rsa	:= base64.c rsa_key_manager_ca.c rsa_key_manager.c
+srcs_helper	:= $(srcs) fde_helper.c
 
 objs_key 	:= $(patsubst %.c,$(out-dir)/fde_key_manager/%.o, $(srcs_key))
 objs_rsa	:= $(patsubst %.c,$(out-dir)/fde_key_manager/%.o, $(srcs_rsa))
+objs_helper	:= $(patsubst %.c,$(out-dir)/fde_key_manager/%.o, $(srcs_helper))
 
 CFLAGS += -I./
 
@@ -43,7 +45,7 @@ LDFLAGS += -L$(OPTEE_CLIENT_EXPORT)/lib -lteec -ljson-c
 LDFLAGS += -lpthread -lm
 
 .PHONY: all
-all: fde-reveal-key fde-setup fde-key-manager rsa-key-manager
+all: fde-reveal-key fde-setup fde-key-manager rsa-key-manager fde-helper
 
 fde-reveal-key: $(objs_key)
 	@echo "  LD      $(out-dir)/fde_key_manager/$@"
@@ -60,6 +62,10 @@ fde-key-manager: $(objs_key)
 rsa-key-manager: $(objs_rsa)
 	@echo "  LD      $(out-dir)/fde_key_manager/$@"
 	$(q)@$(CC) -o $(out-dir)/fde_key_manager/$@ $+ $(LDFLAGS)
+
+fde-helper: $(objs_helper)
+	@echo "  LD      $(out-dir)/fde_key_manager/$@"
+	$(q)@$(CC) -o $(out-dir)/fde_key_manager/$@ $+ $(LDFLAGS) -lcryptsetup
 
 $(out-dir)/fde_key_manager/%.o: $(CURDIR)/%.c
 	$(q)mkdir -p $(out-dir)/fde_key_manager
