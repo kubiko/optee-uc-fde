@@ -189,30 +189,54 @@ static void print_help(void) {
     printf("FDE helper encrypts defined device, seals the key and stores it in LUKS header token store.\n");
     printf("If device is already ecnrypted and there is sealed key in token store, device is unlocked instead.\n\n");
     printf("Usage:\n");
-    printf("\t--help: invoke this help\n");
-    printf("Required options:\n");
-    printf("\t\t--device=<device path>            The device to be encrypted.\n");
-    printf("\t\t--label=<mapper device label>     The mapper device lable to be used.\n");
-    printf("\tOptional parameters\n");
-    printf("\t\t--cipher=STRING                   The cipher used to encrypt the disk (see /proc/crypto).\n");
+    printf("\t--help\n");
+    printf("\t\tinvoke this help\n");
+    printf("\nRequired options:\n");
+    printf("\t\t--device=<device path>\n");
+    printf("\t\t\tThe device to be encrypted.\n");
+    printf("\t\t--label=<mapper device label>\n");
+    printf("\t\t\tThe mapper device lable to be used.\n");
+    printf("\n\tOptional parameters\n");
+    printf("\t\t--format\n");
+    printf("\t\t\tIgnore existing LUKS header and format volume with new key.\n");
+    printf("\n\t\t--pre-format-cmd=<cmd>\n");
+    printf("\t\t\tThe optional command to be run before the new volume is formatted.\n");
+    printf("\t\t\tThis could be used to prepare content which might be used later by '--post-format-cmd'.\n");
+    printf("\n\t\t--post-format-cmd=<cmd>\n");
+    printf("\t\t\tThe optional command to be run after new encryprted volume is created.\n");
+    printf("\n\t\t--post-unlock-cmd=<cmd>\n");
+    printf("\t\t\tThe optional command to be run once device is unlocked.\n");
+    printf("\n\tOptional parameters for cryptsetup tuning:\n");
+    printf("\t\t--cipher=STRING\n");
+    printf("\t\t\tThe cipher used to encrypt the disk (see /proc/crypto).\n");
     printf("\t\t\tdefault: %s-%s\n", DEFAULT_CIPHER, DEFAULT_CIPHER_MODE);
-    printf("\t\t--hash=STRING                     The hash used to create the encryption key from the passphrase\n");
+    printf("\n\t\t--hash=STRING\n");
+    printf("\t\t\tThe hash used to create the encryption key from the passphrase\n");
     printf("\t\t\tdefault: %s\n", DEFAULT_HASH);
-    printf("\t\t--key-size=BITS                   The size of the encryption key\n");
+    printf("\n\t\t--key-size=BITS\n");
+    printf("\t\t\tThe size of the encryption key\n");
     printf("\t\t\tdefault: %d\n", DEFAULT_KEY_SIZE);
-    printf("\t\t--sector-size=INT                 Encryption sector size\n");
+    printf("\n\t\t--sector-size=INT\n");
+    printf("\t\t\tEncryption sector size\n");
     printf("\t\t\tdefault: %d\n", DEFAULT_SECTOR_SIZE);
-    printf("\t\t--pbkdf=STRING                    PBKDF algorithm (for LUKS2): argon2i, argon2id, pbkdf2\n");
+    printf("\n\t\t--pbkdf=STRING\n");
+    printf("\t\t\tPBKDF algorithm (for LUKS2): argon2i, argon2id, pbkdf2\n");
     printf("\t\t\tdefault: %s\n", DEFAULT_LUKS2_PBKDF);
-    printf("\t\t--pbkdf-memory=kilobytes          PBKDF memory cost limit\n");
+    printf("\n\t\t--pbkdf-memory=kilobytes\n");
+    printf("\t\t\tPBKDF memory cost limit\n");
     printf("\t\t\tdefault: %d\n", DEFAULT_LUKS2_MEMORY_KB);
-    printf("\t\t--pbkdf-parallel=threads          PBKDF parallel cost\n");
+    printf("\n\t\t--pbkdf-parallel=threads\n");
+    printf("\t\t\tPBKDF parallel cost\n");
     printf("\t\t\tdefault: %d\n", DEFAULT_LUKS2_PARALLEL_THREADS);
-    printf("\t\t--pbkdf-force-iterations=LONG     PBKDF iterations cost (forced, disables benchmark)\n");
-    printf("\t\t--iter-time=msecs                 PBKDF iteration time for LUKS (in ms)\n");
+    printf("\n\t\t--pbkdf-force-iterations=LONG\n");
+    printf("\t\t\tPBKDF iterations cost (forced, disables benchmark)\n");
+    printf("\n\t\t--iter-time=msecs\n");
+    printf("\t\t\tPBKDF iteration time for LUKS (in ms)\n");
     printf("\t\t\tdefault: %d\n", DEFAULT_LUKS2_ITER_TIME);
-    printf("\t\t--luks2-metadata-size=bytes       LUKS2 header metadata area size\n");
-    printf("\t\t--luks2-keyslots-size=bytes       LUKS2 header keyslots area size\n");
+    printf("\n\t\t--luks2-metadata-size=bytes\n");
+    printf("\t\t\tLUKS2 header metadata area size\n");
+    printf("\n\t\t--luks2-keyslots-size=bytes\n");
+    printf("\t\t\tLUKS2 header keyslots area size\n");
     printf("\n");
 }
 
@@ -505,7 +529,7 @@ static int unseal_key_from_token(struct crypt_device *cd,
        ret = EXIT_FAILURE;
        goto cleanup;
     }
-    
+
     // keyslot id is string, we need to get int
     *key_slot_id = atoi(json_object_get_string(j_keyslot_id));
 
@@ -621,8 +645,24 @@ int activate_by_token(struct crypt_device *cd,
     return EXIT_SUCCESS;
 }
 
+int handle_post_activation_step(const char *label, const char *post_unlock_cmd) {
+    int ret = EXIT_SUCCESS;
+    ret = system(post_unlock_cmd);
+    if (ret) {
+        if (WIFSIGNALED(ret))
+            ree_log(REE_ERROR, "Post unlock cmd for label '%s' terminated with signal: %d", label, WTERMSIG(ret));
+        else if (WIFEXITED(ret))
+            ree_log(REE_ERROR, "Post unlock cmd for label '%s' content exited with: %d", label, WEXITSTATUS(ret));
+        else
+            ree_log(REE_ERROR, "Post unlock cmd for label '%s' failed with %d", ret);
+    }
+    return ret;
+}
+
 static int format_and_add_key(struct crypt_device *cd,
                               const char *label,
+                              const char *pre_format_cmd,
+                              const char *post_format_cmd,
                               int key_slot_id,
                               int token_id,
                               uint32_t activate_flags) {
@@ -631,6 +671,7 @@ static int format_and_add_key(struct crypt_device *cd,
     int ret;
     int key_size = DEFAULT_KEY_SIZE/8;
     char cipher[MAX_CIPHER_LEN], cipher_mode[MAX_CIPHER_LEN];
+
 	struct crypt_pbkdf_type pbkdf = {
 		.type = opt_pbkdf,
 		.hash = opt_hash,
@@ -638,6 +679,7 @@ static int format_and_add_key(struct crypt_device *cd,
 		.max_memory_kb = (uint32_t)opt_pbkdf_memory,
         .time_ms = opt_iteration_time
 	}, pbkdf_tmp;
+
 	struct crypt_params_luks2 params = {
 		.pbkdf = &pbkdf,
 		.data_device = NULL,
@@ -671,6 +713,19 @@ static int format_and_add_key(struct crypt_device *cd,
         strcpy(cipher_mode, DEFAULT_CIPHER_MODE);
     }
 
+    if (pre_format_cmd) {
+        ret = system(pre_format_cmd);
+        if (ret) {
+            if (WIFSIGNALED(ret))
+                ree_log(REE_ERROR, "Pre format cmd for label '%s' terminated with signal: %d", label, WTERMSIG(ret));
+            else if (WIFEXITED(ret))
+                ree_log(REE_ERROR, "Pre format cmd for label '%s' content exited with: %d", label, WEXITSTATUS(ret));
+            else
+                ree_log(REE_ERROR, "Pre format cmd for label '%s' failed with %d", ret);
+            goto cleanup;
+        }
+    }
+
     ree_log(REE_INFO, "crypt_format....");
     /*
      * NULLs for uuid and volume_key means that these attributes will be
@@ -684,14 +739,14 @@ static int format_and_add_key(struct crypt_device *cd,
                        NULL,             /* generate volume key from RNG */
                        key_size,         /* key size in bytes */
                        &params);         /* default parameters */
- 
+
     if (ret < 0) {
         ree_log(REE_ERROR, "crypt_format() failed on device %s", crypt_get_device_name(cd));
         return ret;
     }
 
     ree_log(REE_INFO, "Device successfully crypt-formated");
- 
+
     // generate new random key
     key_len = FDE_KEY_SIZE;
     key = generate_rng(key_len);
@@ -726,6 +781,24 @@ static int format_and_add_key(struct crypt_device *cd,
                         key_slot_id,
                         activate_flags);
 
+    if (ret) {
+        ree_log(REE_ERROR, "Failed to unlock the volume: %s, %d", label, ret);
+        goto cleanup;
+    }
+
+    if (post_format_cmd) {
+        ret = system(post_format_cmd);
+        if (ret) {
+            if (WIFSIGNALED(ret))
+                ree_log(REE_ERROR, "Post format cmd for label '%s' terminated with signal: %d", label, WTERMSIG(ret));
+            else if (WIFEXITED(ret))
+                ree_log(REE_ERROR, "Post format cmd for label '%s' exited with: %d", label, WEXITSTATUS(ret));
+            else
+                ree_log(REE_ERROR, "Post format cmd for label '%s' failed with %d", ret);
+            goto cleanup;
+        }
+    }
+
     cleanup:
         if (key)
             sec_free_buffer(key, key_len);
@@ -733,7 +806,11 @@ static int format_and_add_key(struct crypt_device *cd,
 }
 
 int setup_block_device(const char *path,
-                       const char *label) {
+                       const char *label,
+                       int format,
+                       const char *pre_format_cmd,
+                       const char *post_format_cmd,
+                       const char *post_unlock_cmd) {
 
     struct crypt_device *cd;
     int ret;
@@ -746,12 +823,16 @@ int setup_block_device(const char *path,
     }
     ree_log(REE_INFO, "Context is attached to block device %s.", crypt_get_device_name(cd));
 
-    // check if the device has LUKS setup
-    ret = crypt_load(cd, CRYPT_LUKS, NULL);
-    if (ret < 0) {
+    if (!format) {
+        // check if the device has LUKS setup
+        ret = crypt_load(cd, CRYPT_LUKS, NULL);
+    }
+    if (format || ret < 0) {
         ree_log(REE_INFO, "Device %s is not a valid LUKS device (%d)", crypt_get_device_name(cd), ret);
         ret = format_and_add_key(cd,
                                  label,
+                                 pre_format_cmd,
+                                 post_format_cmd,
                                  CRYPT_SLOT_ID,
                                  CRYPT_TOKEN_ID,
                                  CRYPT_ACTIVATE_FLAG);
@@ -761,6 +842,9 @@ int setup_block_device(const char *path,
                               CRYPT_TOKEN_ID,
                               label,
                               CRYPT_ACTIVATE_FLAG);
+        if (!ret && post_unlock_cmd) {
+            ret = handle_post_activation_step(label, post_unlock_cmd);
+        }
     }
     crypt_free(cd);
     return ret;
@@ -783,15 +867,23 @@ int main(int argc, char *argv[]) {
     size_t buf_len = 0;
     int opt = 0;
     int long_index =0;
+    int format = 0;
     char *device;
     char *label;
     char *eptr;
+    char *pre_format_cmd = NULL;
+    char *post_format_cmd = NULL;
+    char *post_unlock_cmd = NULL;
 
     static struct option long_options[] = {
         // long name              | has argument  | flag | short value
         { "help",                   no_argument,       0, 'h'},
         { "device",                 required_argument, 0, 'd'},
         { "label",                  required_argument, 0, 'l'},
+        { "format",                 no_argument,       0, 'F'},
+        { "pre-format-cmd",         required_argument, 0, 'P'},
+        { "post-format-cmd",        required_argument, 0, 'f'},
+        { "post-unlock-cmd",        required_argument, 0, 'U'},
         { "hash",                   required_argument, 0, 'H'},
         { "cipher",                 required_argument, 0, 'c'},
         { "key-size",               required_argument, 0, 's'},
@@ -833,6 +925,33 @@ int main(int argc, char *argv[]) {
                 }
                 label = optarg;
                 break;
+            case 'F':
+                format = 1;
+                break;
+            case 'P': // pre-format-cmd
+                if(!optarg) {
+                    printf("Missing argument for %c option\n", opt);
+                    print_help();
+                    exit(EXIT_FAILURE);
+                }
+                pre_format_cmd = optarg;
+                break;
+            case 'f': // post-format-cmd
+                if(!optarg) {
+                    printf("Missing argument for %c option\n", opt);
+                    print_help();
+                    exit(EXIT_FAILURE);
+                }
+                post_format_cmd = optarg;
+                break;
+            case 'U': // post-unlock-cmd
+                if(!optarg) {
+                    printf("Missing argument for %c option\n", opt);
+                    print_help();
+                    exit(EXIT_FAILURE);
+                }
+                post_unlock_cmd = optarg;
+                break;
             case 'H': // hash
                 opt_hash = optarg;
                 break;
@@ -869,7 +988,7 @@ int main(int argc, char *argv[]) {
             case 'K': // luks2-keyslots-size
                 if (tools_string_to_size(optarg, &opt_luks2_keyslots_size)) {
                     printf("error: invalid value passed to --luks2-keyslots-size (%s).\n", optarg);
-                    exit(EXIT_FAILURE);      
+                    exit(EXIT_FAILURE);
                 }
                 break;
             default:
@@ -883,5 +1002,5 @@ int main(int argc, char *argv[]) {
         ree_log(REE_ERROR, "Missing label option");
         exit(EXIT_FAILURE);
     }
-    return setup_block_device(device, label);
+    return setup_block_device(device, label, format, pre_format_cmd, post_format_cmd, post_unlock_cmd);
 }
