@@ -15,7 +15,6 @@
 #include <libcryptsetup.h>
 
 #include <tee_client_api.h>
-#include <tee_api_defines.h>
 
 #include <json-c/json.h>
 
