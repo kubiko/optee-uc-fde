@@ -594,32 +594,6 @@ const crypt_token_handler OPTEE_token = {
     .buffer_free = sec_free_buffer,
 };
 
-static int unlock_from_token(struct crypt_device *cd,
-                      int token_id,
-                      const char *label,
-                      uint32_t activate_flags) {
-
-    int ret = EXIT_SUCCESS;
-    char *decrypted_key_buf = NULL;
-    size_t decrypted_key_buf_len = 0;
-    int key_slot_id;
-    ret = decrypt_key_from_token(cd,
-                                token_id,
-                                &decrypted_key_buf,
-                                &decrypted_key_buf_len,
-                                &key_slot_id);
-    if (ret != EXIT_SUCCESS || decrypted_key_buf == NULL) {
-        return ret;
-    }
-    // unlock
-    return unlock_volume(cd,
-                        label,
-                        decrypted_key_buf,
-                        decrypted_key_buf_len,
-                        key_slot_id,
-                        activate_flags);
-}
-
 static int activate_by_token(struct crypt_device *cd,
                       int token_id,
                       const char *label,
