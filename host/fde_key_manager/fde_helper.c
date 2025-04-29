@@ -70,13 +70,13 @@ static uint64_t opt_luks2_keyslots_size   = 0;
 
 enum Modes {unknown, automatic, manual};
 
-int store_encrypted_key(struct crypt_device *cd,
+static int store_encrypted_key(struct crypt_device *cd,
                      char* key,
                      int key_len,
                      int key_slot_id,
                      int token_id);
 
-int unlock_volume(struct crypt_device *cd,
+static int unlock_volume(struct crypt_device *cd,
                   const char *label,
                   const char* key,
                   int key_len,
@@ -89,7 +89,7 @@ static int decrypt_key_from_token(struct crypt_device *cd,
                           size_t *buffer_len,
                           int* key_slot_id);
 
-void sec_free_buffer(void *buffer, size_t buffer_len);
+static void sec_free_buffer(void *buffer, size_t buffer_len);
 
 /*
  * Device size string parsing, suffixes:
@@ -98,7 +98,7 @@ void sec_free_buffer(void *buffer, size_t buffer_len);
  * kiB|KiB|miB|MiB|giB|GiB|tiB|TiB - 1024 base
  * kb |KB |mM |MB |gB |GB |tB |TB  - 1000 base
  */
-int tools_string_to_size(const char *s, uint64_t *size) {
+static int tools_string_to_size(const char *s, uint64_t *size) {
 	char *endp = NULL;
 	size_t len;
 	uint64_t mult_base, mult, tmp;
@@ -155,7 +155,7 @@ int tools_string_to_size(const char *s, uint64_t *size) {
 	return 0;
 }
 
-int crypt_parse_name_and_mode(const char *s,
+static int crypt_parse_name_and_mode(const char *s,
                               char *cipher,
 			                  char *cipher_mode) {
 	if (!s || !cipher || !cipher_mode)
@@ -240,7 +240,7 @@ static void print_help(void) {
     printf("\n");
 }
 
-int store_encrypted_key(struct crypt_device *cd,
+static int store_encrypted_key(struct crypt_device *cd,
                      char* key,
                      int key_len,
                      int key_slot_id,
@@ -404,7 +404,7 @@ int store_encrypted_key(struct crypt_device *cd,
         return ret;
 }
 
-int unlock_volume(struct crypt_device *cd,
+static int unlock_volume(struct crypt_device *cd,
                   const char *label,
                   const char* key,
                   int key_len,
@@ -579,7 +579,7 @@ static int optee_open_token(struct crypt_device *cd,
 }
 
 // typedef void (*crypt_token_buffer_free_func) (void *buffer, size_t buffer_len);
-void sec_free_buffer(void *buffer, size_t buffer_len) {
+static void sec_free_buffer(void *buffer, size_t buffer_len) {
     // zero buffer before freeing it
 	volatile uint8_t *p = (volatile uint8_t *)buffer;
 
@@ -594,7 +594,7 @@ const crypt_token_handler OPTEE_token = {
     .buffer_free = sec_free_buffer,
 };
 
-int unlock_from_token(struct crypt_device *cd,
+static int unlock_from_token(struct crypt_device *cd,
                       int token_id,
                       const char *label,
                       uint32_t activate_flags) {
@@ -620,7 +620,7 @@ int unlock_from_token(struct crypt_device *cd,
                         activate_flags);
 }
 
-int activate_by_token(struct crypt_device *cd,
+static int activate_by_token(struct crypt_device *cd,
                       int token_id,
                       const char *label,
                       uint32_t activate_flags) {
@@ -645,7 +645,7 @@ int activate_by_token(struct crypt_device *cd,
     return EXIT_SUCCESS;
 }
 
-int handle_post_activation_step(const char *label, const char *post_unlock_cmd) {
+static int handle_post_activation_step(const char *label, const char *post_unlock_cmd) {
     int ret = EXIT_SUCCESS;
     ret = system(post_unlock_cmd);
     if (ret) {
@@ -805,7 +805,7 @@ static int format_and_add_key(struct crypt_device *cd,
         return ret;
 }
 
-int setup_block_device(const char *path,
+static int setup_block_device(const char *path,
                        const char *label,
                        int format,
                        const char *pre_format_cmd,
