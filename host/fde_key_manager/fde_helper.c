@@ -26,7 +26,7 @@
 #define FDE_JSON_TYPE                     "type"
 #define FDE_JSON_TYPE_OPTEE               "optee-ta"
 #define FDE_JSON_KEYSLOTS                 "keyslots"
-#define FDE_JSON_SEALED_KEY               "sealed-key"
+#define FDE_JSON_ENCRYPTED_KEY            "encrypted-key"
 #define FDE_JSON_HANDLE                   "handle"
 #define FDE_JSON_LABEL                    "label"
 
@@ -70,7 +70,7 @@ static uint64_t opt_luks2_keyslots_size   = 0;
 
 enum Modes {unknown, automatic, manual};
 
-int store_sealed_key(struct crypt_device *cd,
+int store_encrypted_key(struct crypt_device *cd,
                      char* key,
                      int key_len,
                      int key_slot_id,
@@ -83,7 +83,7 @@ int unlock_volume(struct crypt_device *cd,
                   int key_slot_id,
                   uint32_t activate_flags);
 
-static int unseal_key_from_token(struct crypt_device *cd,
+static int decrypt_key_from_token(struct crypt_device *cd,
                           int token_id,
                           char **buffer,
                           size_t *buffer_len,
@@ -186,8 +186,8 @@ int crypt_parse_name_and_mode(const char *s,
 
 static void print_help(void) {
     printf("Helper to self encrypt raw partition\n\n");
-    printf("FDE helper encrypts defined device, seals the key and stores it in LUKS header token store.\n");
-    printf("If device is already ecnrypted and there is sealed key in token store, device is unlocked instead.\n\n");
+    printf("FDE helper encrypts defined device, encrypts the key and stores it in LUKS header token store.\n");
+    printf("If device is already ecnrypted and there is encrypted key in the token store, device is unlocked instead.\n\n");
     printf("Usage:\n");
     printf("\t--help\n");
     printf("\t\tinvoke this help\n");
@@ -240,17 +240,17 @@ static void print_help(void) {
     printf("\n");
 }
 
-int store_sealed_key(struct crypt_device *cd,
+int store_encrypted_key(struct crypt_device *cd,
                      char* key,
                      int key_len,
                      int key_slot_id,
                      int token_id) {
 
-    unsigned char *sealed_key_buf = NULL;
+    unsigned char *encrypted_key_buf = NULL;
     unsigned char *handle_buf = NULL;
-    char *sealed_key = NULL;
+    char *encrypted_key = NULL;
     char *handle = NULL;
-    size_t sealed_key_buf_len = 0;
+    size_t encrypted_key_buf_len = 0;
     size_t handle_buf_len = 0;
     char key_slot_str[5]; // int within quotes
     struct json_object *j_token = NULL;
@@ -258,7 +258,7 @@ int store_sealed_key(struct crypt_device *cd,
     struct json_object *j_keyslots = NULL;
     struct json_object *j_keyslot_x = NULL;
     struct json_object *j_handle = NULL;
-    struct json_object *j_sealed_key = NULL;
+    struct json_object *j_encrypted_key = NULL;
     const char *result = NULL;
     int ret;
     int token;
@@ -267,10 +267,10 @@ int store_sealed_key(struct crypt_device *cd,
     // encrypt key
     handle_buf_len = HANDLE_SIZE;
     handle_buf = (char *)malloc(HANDLE_SIZE);
-    sealed_key_buf_len = MAX_BUF_SIZE;
-    sealed_key_buf = (char *)malloc(MAX_BUF_SIZE);
-    if (!sealed_key_buf) {
-        ree_log(REE_ERROR, "sealed_key buf alloc failed");
+    encrypted_key_buf_len = MAX_BUF_SIZE;
+    encrypted_key_buf = (char *)malloc(MAX_BUF_SIZE);
+    if (!encrypted_key_buf) {
+        ree_log(REE_ERROR, "encrypted_key buf alloc failed");
         ret = EXIT_FAILURE;
         goto cleanup;
     }
@@ -279,8 +279,8 @@ int store_sealed_key(struct crypt_device *cd,
                       key_len,
                       handle_buf,
                       &handle_buf_len,
-                      sealed_key_buf,
-                      &sealed_key_buf_len);
+                      encrypted_key_buf,
+                      &encrypted_key_buf_len);
 
     if (ret) {
         ree_log(REE_ERROR, "Key encrypt crypto operation failed: 0x%X", ret);
@@ -325,21 +325,21 @@ int store_sealed_key(struct crypt_device *cd,
     // ownership of j_keyslots has been taken by j_response
     j_keyslots =  NULL;
 
-    // encode sealed key with base64
-    sealed_key = base64_encode(sealed_key_buf, sealed_key_buf_len);
-    if (!sealed_key) {
-        ree_log(REE_ERROR, "Failed to base64 encode sealed key");
+    // encode encrypted key with base64
+    encrypted_key = base64_encode(encrypted_key_buf, encrypted_key_buf_len);
+    if (!encrypted_key) {
+        ree_log(REE_ERROR, "Failed to base64 encode encrypted key");
         goto cleanup;
     }
 
-    j_sealed_key = json_object_new_string(sealed_key);
-    if (!j_sealed_key) {
-        ree_log(REE_ERROR, "Failed to create json obj with sealed key");
+    j_encrypted_key = json_object_new_string(encrypted_key);
+    if (!j_encrypted_key) {
+        ree_log(REE_ERROR, "Failed to create json obj with encrypted key");
         goto cleanup;
     }
-    json_object_object_add(j_token, FDE_JSON_SEALED_KEY, j_sealed_key);
-    // ownership of j_sealed_key has been taken by j_response
-    j_sealed_key =  NULL;
+    json_object_object_add(j_token, FDE_JSON_ENCRYPTED_KEY, j_encrypted_key);
+    // ownership of j_encrypted_key has been taken by j_response
+    j_encrypted_key =  NULL;
 
     handle = base64_encode(handle_buf, handle_buf_len);
     if (!handle) {
@@ -352,7 +352,7 @@ int store_sealed_key(struct crypt_device *cd,
         goto cleanup;
     }
     json_object_object_add(j_token, FDE_JSON_HANDLE, j_handle);
-    // ownership of j_sealed_key has been taken by j_handle
+    // ownership of j_encrypted_key has been taken by j_handle
     j_handle =  NULL;
     result = json_object_to_json_string(j_token);
 
@@ -361,7 +361,7 @@ int store_sealed_key(struct crypt_device *cd,
     ret = crypt_token_json_set(cd, token_id, result);
     if (ret < 0) {
         ree_log(REE_ERROR, 
-                "Failed to store sealed key token to the token slot %d, in LUKS header",
+                "Failed to store encrypted key token to the token slot %d, in LUKS header",
                 token_id);
         goto cleanup;
     }
@@ -381,10 +381,10 @@ int store_sealed_key(struct crypt_device *cd,
     }
 
     cleanup:
-        if (sealed_key_buf)
-            free(sealed_key_buf);
-        if (sealed_key)
-            free(sealed_key);
+        if (encrypted_key_buf)
+            free(encrypted_key_buf);
+        if (encrypted_key)
+            free(encrypted_key);
         if (handle_buf)
             free(handle_buf);
         if (handle)
@@ -397,8 +397,8 @@ int store_sealed_key(struct crypt_device *cd,
             json_object_put(j_keyslot_x);
         if (j_handle)
             json_object_put(j_handle);
-        if (j_sealed_key)
-            json_object_put(j_sealed_key);
+        if (j_encrypted_key)
+            json_object_put(j_encrypted_key);
         if (j_token)
             json_object_put(j_token);
         return ret;
@@ -432,7 +432,7 @@ int unlock_volume(struct crypt_device *cd,
 /**
  * op-tee token handler implementation of crypt_token_open_func
  */
-static int unseal_key_from_token(struct crypt_device *cd,
+static int decrypt_key_from_token(struct crypt_device *cd,
                           int token_id,
                           char **buffer,
                           size_t *buffer_len,
@@ -441,15 +441,15 @@ static int unseal_key_from_token(struct crypt_device *cd,
     json_bool j_ret;
     int ret = EXIT_SUCCESS;
     struct json_object *j_token = NULL;
-    struct json_object *j_sealed_key = NULL;
+    struct json_object *j_encrypted_key = NULL;
     struct json_object *j_handle = NULL;
     struct json_object *j_keyslots = NULL;
     struct json_object *j_keyslot_id = NULL;
-    unsigned char *sealed_key_buf = NULL;
+    unsigned char *encrypted_key_buf = NULL;
     unsigned char *handle_buf = NULL;
-    size_t sealed_key_buf_len = 0;
+    size_t encrypted_key_buf_len = 0;
     size_t handle_buf_len = 0;
-    char *unsealed_key = NULL;
+    char *decrypted_key = NULL;
 
     ret = crypt_token_json_get(cd, token_id, &token);
     if (ret < 0) {
@@ -457,7 +457,7 @@ static int unseal_key_from_token(struct crypt_device *cd,
          return ret;
     }
 
-    // extract sealed key and handle and slot id
+    // extract encrypted key and handle and slot id
     j_token = json_tokener_parse(token);
     if (!j_token) {
         ree_log(REE_ERROR, "Malformed token json from LUKS header" );
@@ -465,23 +465,23 @@ static int unseal_key_from_token(struct crypt_device *cd,
     }
 
     // get other request data:
-    // FDE_JSON_SEALED_KEY | FDE_JSON_HANDLE
+    // FDE_JSON_ENCRYPTED_KEY | FDE_JSON_HANDLE
     j_ret = json_object_object_get_ex(j_token,
-                                      FDE_JSON_SEALED_KEY,
-                                      &j_sealed_key);
+                                      FDE_JSON_ENCRYPTED_KEY,
+                                      &j_encrypted_key);
     if ((j_ret != TRUE) ||
-        (json_type_string != json_object_get_type(j_sealed_key))
+        (json_type_string != json_object_get_type(j_encrypted_key))
        ) {
-        ree_log(REE_ERROR, "sealed key json malformed[%d]", j_ret);
+        ree_log(REE_ERROR, "encrypted key json malformed[%d]", j_ret);
         ret = EXIT_FAILURE;
         goto cleanup;
     }
-    sealed_key_buf = base64_decode(json_object_get_string(j_sealed_key),
-                                    strlen(json_object_get_string(j_sealed_key)),
-                                    &sealed_key_buf_len);
+    encrypted_key_buf = base64_decode(json_object_get_string(j_encrypted_key),
+                                    strlen(json_object_get_string(j_encrypted_key)),
+                                    &encrypted_key_buf_len);
 
-    if (!sealed_key_buf){
-        ree_log(REE_ERROR, "failed to decode sealed key from base64");
+    if (!encrypted_key_buf){
+        ree_log(REE_ERROR, "failed to decode encrypted key from base64");
         ret = EXIT_FAILURE;
         goto cleanup;
     }
@@ -537,13 +537,13 @@ static int unseal_key_from_token(struct crypt_device *cd,
     *buffer_len = MAX_BUF_SIZE;
     *buffer = (unsigned char *)malloc(*buffer_len);
     if (!*buffer){
-        ree_log(REE_ERROR, "unsealed_key buf alloc failed");
+        ree_log(REE_ERROR, "decrypted_key buf alloc failed");
         ret = EXIT_FAILURE;
         goto cleanup;
     }
 
-    ret = decrypt_key(sealed_key_buf,
-                      sealed_key_buf_len,
+    ret = decrypt_key(encrypted_key_buf,
+                      encrypted_key_buf_len,
                       handle_buf,
                       handle_buf_len,
                       *buffer,
@@ -556,12 +556,12 @@ static int unseal_key_from_token(struct crypt_device *cd,
     }
 
     cleanup:
-        if (sealed_key_buf)
-            free(sealed_key_buf);
+        if (encrypted_key_buf)
+            free(encrypted_key_buf);
         if (handle_buf)
             free(handle_buf);
-        if (unsealed_key)
-            free(unsealed_key);
+        if (decrypted_key)
+            free(decrypted_key);
 
         return ret;
 }
@@ -575,7 +575,7 @@ static int optee_open_token(struct crypt_device *cd,
                           size_t *buffer_len,
                           void *usrptr) {
     int key_slot_id;
-    return unseal_key_from_token(cd, token_id, buffer, buffer_len, &key_slot_id);
+    return decrypt_key_from_token(cd, token_id, buffer, buffer_len, &key_slot_id);
 }
 
 // typedef void (*crypt_token_buffer_free_func) (void *buffer, size_t buffer_len);
@@ -600,22 +600,22 @@ int unlock_from_token(struct crypt_device *cd,
                       uint32_t activate_flags) {
 
     int ret = EXIT_SUCCESS;
-    char *unsealed_key_buf = NULL;
-    size_t unsealed_key_buf_len = 0;
+    char *decrypted_key_buf = NULL;
+    size_t decrypted_key_buf_len = 0;
     int key_slot_id;
-    ret = unseal_key_from_token(cd,
+    ret = decrypt_key_from_token(cd,
                                 token_id,
-                                &unsealed_key_buf,
-                                &unsealed_key_buf_len,
+                                &decrypted_key_buf,
+                                &decrypted_key_buf_len,
                                 &key_slot_id);
-    if (ret != EXIT_SUCCESS || unsealed_key_buf == NULL) {
+    if (ret != EXIT_SUCCESS || decrypted_key_buf == NULL) {
         return ret;
     }
     // unlock
     return unlock_volume(cd,
                         label,
-                        unsealed_key_buf,
-                        unsealed_key_buf_len,
+                        decrypted_key_buf,
+                        decrypted_key_buf_len,
                         key_slot_id,
                         activate_flags);
 }
@@ -770,8 +770,8 @@ static int format_and_add_key(struct crypt_device *cd,
 
     ree_log(REE_INFO, "Keyslot is initialized.");
 
-    // store sealed key token
-    store_sealed_key(cd, key, key_len, key_slot_id, token_id);
+    // store encrypted key token
+    store_encrypted_key(cd, key, key_len, key_slot_id, token_id);
 
     // unlock the volume
     ret = unlock_volume(cd,
@@ -852,11 +852,11 @@ int setup_block_device(const char *path,
 
 /**
  * @brief Helper to setup encryption on block device
- *   Block device is formated and new encryption setup. FDE passphrase is sealed
- *   with Trusted Application and sealed key + handler is stored in
+ *   Block device is formated and new encryption setup. FDE passphrase is encrypted
+ *   with Trusted Application and encrypted key + handler is stored in
  *   LUKS header token slot.
  *   If block device has already encryption configured, it is unlocked instead
- *   using sealed key and handle stored in the LUKS header token slot
+ *   using encrypted key and handle stored in the LUKS header token slot
  */
 int main(int argc, char *argv[]) {
     int ret = EXIT_SUCCESS;
