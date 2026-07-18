@@ -360,6 +360,10 @@ static TEE_Result hkdf_sha256(const uint8_t *ikm,  size_t ikm_len,
     size_t   produced   = 0;
     uint8_t  ctr        = 1;
 
+    /* RFC 5869 limit; also keeps the uint8_t block counter from wrapping */
+    if (!ikm || !out || out_len > 255 * sizeof(t_prev))
+        return TEE_ERROR_BAD_PARAMETERS;
+
     /* ---- Extract: PRK = HMAC-SHA256(salt=zeros, IKM=seed) --------------- */
     TEE_Attribute attr;
     TEE_InitRefAttribute(&attr, TEE_ATTR_SECRET_VALUE,
@@ -456,6 +460,8 @@ static TEE_Result hkdf_sha256(const uint8_t *ikm,  size_t ikm_len,
 
     TEE_FreeTransientObject(expand_key);
     TEE_MemFill(prk, 0, sizeof(prk));
+    /* t_prev holds the last output block, i.e. derived key material */
+    TEE_MemFill(t_prev, 0, sizeof(t_prev));
     return TEE_SUCCESS;
 
 err_op:
@@ -468,6 +474,7 @@ err_prk_key:
     }
 err_clean:
     TEE_MemFill(prk, 0, sizeof(prk));
+    TEE_MemFill(t_prev, 0, sizeof(t_prev));
     return res;
 }
 
@@ -704,6 +711,7 @@ static TEE_Result derive_rsa_keypair(session_ctx_t *ctx,
     res = derive_huk_bound_seed(seed, seed_len, bound_seed);
     if (res != TEE_SUCCESS) {
         EMSG("seed_crypto_ta: HUK binding failed: 0x%x", res);
+        TEE_MemFill(bound_seed, 0, sizeof(bound_seed));
         return res;
     }
 
@@ -945,6 +953,7 @@ static TEE_Result __maybe_unused derive_ec_keypair(session_ctx_t *ctx,
                       priv, scalar_bytes);
     TEE_MemFill(bound_seed, 0, sizeof(bound_seed));
     if (res != TEE_SUCCESS) {
+      TEE_MemFill(priv, 0, scalar_bytes);
       TEE_Free(priv);
       return res;
     }
@@ -960,6 +969,7 @@ static TEE_Result __maybe_unused derive_ec_keypair(session_ctx_t *ctx,
 
     res = TEE_AllocateTransientObject(TEE_TYPE_ECDSA_KEYPAIR, key_bits, &kp);
     if (res != TEE_SUCCESS) {
+      TEE_MemFill(priv, 0, scalar_bytes);
       TEE_Free(priv);
       return res;
     }
@@ -1286,7 +1296,9 @@ TEE_Result cmd_asymmetric_sign(session_ctx_t *ctx,
         return res;
 
     /* Select signing algorithm */
-    TEE_GetObjectInfo1(ctx->key_pair, &oi);
+    res = TEE_GetObjectInfo1(ctx->key_pair, &oi);
+    if (res != TEE_SUCCESS)
+        return res;
     op_key_bits = oi.objectSize;
 
     if (ctx->algo == ALGO_RSA)
@@ -1350,7 +1362,9 @@ TEE_Result cmd_asymmetric_decrypt(session_ctx_t *ctx,
     if (ctx->algo != ALGO_RSA)
         return TEE_ERROR_NOT_SUPPORTED;
 
-    TEE_GetObjectInfo1(ctx->key_pair, &oi);
+    res = TEE_GetObjectInfo1(ctx->key_pair, &oi);
+    if (res != TEE_SUCCESS)
+        return res;
 
     op = TEE_HANDLE_NULL;
     res = TEE_AllocateOperation(&op, TEE_ALG_RSAES_PKCS1_OAEP_MGF1_SHA256,
