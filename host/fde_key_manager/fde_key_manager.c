@@ -74,6 +74,9 @@ char *get_snap_hook_fde_setup_request(void) {
        return NULL;
     }
 
+    // initialize so an empty response is a valid C string
+    request[0] = '\0';
+
     // read output — track remaining space to prevent overflow
     pos = request;
     size_t remaining = MAX_JSON_BUF_SIZE;
