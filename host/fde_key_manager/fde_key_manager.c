@@ -67,15 +67,12 @@ char *get_snap_hook_fde_setup_request(void) {
         ree_log(REE_ERROR, "Failed to run snapctl command" );
         return NULL;
     }
-    request = (char *)malloc(MAX_JSON_BUF_SIZE);
+    request = calloc(MAX_JSON_BUF_SIZE, sizeof(char));
     if (!request) {
        ree_log(REE_ERROR, "Failed to allocate request buffer" );
        pclose(f);
        return NULL;
     }
-
-    // initialize so an empty response is a valid C string
-    request[0] = '\0';
 
     // read output — track remaining space to prevent overflow
     pos = request;
