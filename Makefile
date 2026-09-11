@@ -25,7 +25,7 @@ CROSS_COMPILE_HOST ?= $(CROSS_COMPILE)
 CROSS_COMPILE_TA ?= $(CROSS_COMPILE)
 
 .PHONY: all
-all: ta fde-reveal-key fde-setup fde-key-manager fde-helper
+all: ta fde-reveal-key fde-setup fde-key-manager
 
 .PHONY: fde-reveal-key
 fde-reveal-key:
