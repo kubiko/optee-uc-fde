@@ -76,6 +76,16 @@ struct counter_object {
 static uint8_t _register[REGISTER_SIZE];
 static uint32_t _extends;
 
+/*
+ * The values the register had after each of the first REGISTER_HISTORY
+ * extends of the boot. A reseal is authorized by any of them: the boot was one
+ * the key unseals for when it had that value, as the keys of ubuntu-data are
+ * after snap-bootstrap extends the register with the claim of the apps slots.
+ * An unseal takes the register as it is.
+ */
+#define REGISTER_HISTORY 8
+static uint8_t _history[REGISTER_HISTORY][REGISTER_SIZE];
+
 static TEE_Result sha256(const void *a, size_t a_len, const void *b,
                          size_t b_len, uint8_t out[REGISTER_SIZE]) {
     TEE_OperationHandle op = TEE_HANDLE_NULL;
@@ -115,6 +125,8 @@ TEE_Result cmd_extend(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
         /* a register that may be half written measures nothing any more */
         TEE_Panic(res);
     }
+    if (_extends < REGISTER_HISTORY)
+        memcpy(_history[_extends], _register, REGISTER_SIZE);
     _extends++;
     DMSG("fde_key_handler: register extended, %"PRIu32" events", _extends);
     return TEE_SUCCESS;
@@ -423,17 +435,29 @@ out:
     return res;
 }
 
+/* matches returns true if the register value is one of the handle's values */
+static bool matches(const struct key_handle_v2 *handle, const uint8_t *value) {
+    const uint8_t *values = (const uint8_t *)handle + sizeof(*handle);
+    bool match = false;
+
+    for (size_t i = 0; i < handle->n_values; i++) {
+        if (!consttime_memcmp(values + i * REGISTER_SIZE, value, REGISTER_SIZE))
+            match = true;
+    }
+    return match;
+}
+
 /*
  * open_v2 checks a v2 handle and opens its sealed key into key, out_size
  * bytes, when the running boot may: the handle is the one sealed, its counter
- * is not retired, and the register is one of its values. handle is a copy the
- * normal world cannot change.
+ * is not retired, and the register is one of its values, or, for a reseal,
+ * had one of them earlier in the boot. handle is a copy the normal world
+ * cannot change.
  */
 static TEE_Result open_v2(struct key_handle_v2 *handle, size_t handle_size,
                           uint8_t *sealed, size_t sealed_size,
-                          uint8_t *key, size_t *out_size) {
+                          uint8_t *key, size_t *out_size, bool reseal) {
     struct counter_object obj;
-    const uint8_t *values = NULL;
     bool rpmb = false, match = false;
     TEE_Result res = TEE_ERROR_GENERIC;
 
@@ -465,9 +489,9 @@ static TEE_Result open_v2(struct key_handle_v2 *handle, size_t handle_size,
     if (res)
         return res;
 
-    values = (const uint8_t *)handle + sizeof(*handle);
-    for (size_t i = 0; i < handle->n_values; i++) {
-        if (!consttime_memcmp(values + i * REGISTER_SIZE, _register, REGISTER_SIZE))
+    match = matches(handle, _register);
+    for (uint32_t i = 0; reseal && i < _extends && i < REGISTER_HISTORY; i++) {
+        if (matches(handle, _history[i]))
             match = true;
     }
     if (!match) {
@@ -524,7 +548,7 @@ TEE_Result cmd_key_decrypt_v2(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) 
         goto out;
     }
     res = open_v2(handle, params[1].memref.size, params[0].memref.buffer,
-                  sealed_size, key, &out_size);
+                  sealed_size, key, &out_size, false);
     if (res)
         goto out;
     memcpy(params[2].memref.buffer, key, out_size);
@@ -541,8 +565,9 @@ out:
 /*
  * cmd_key_reseal_v2 seals a key again, to new register values or a new
  * counter, without revealing it: the running boot has to be one the old handle
- * unseals for, so this works once the TA is locked, as a reseal of a refresh
- * needs. The new counter is not below the one in RPMB.
+ * unseals for, now or earlier in the boot, so this works once the TA is locked,
+ * as a reseal of a refresh needs, and after the register was extended past the
+ * value the key unsealed at. The new counter is not below the one in RPMB.
  *   params[0] memref input:  the sealed key
  *   params[1] memref input:  the handle
  *   params[2] memref input:  the new policy, as for TA_CMD_KEY_ENCRYPT_V2
@@ -593,7 +618,7 @@ TEE_Result cmd_key_reseal_v2(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
         goto out;
     }
     res = open_v2(handle, params[1].memref.size, params[0].memref.buffer,
-                  sealed_size, key, &out_size);
+                  sealed_size, key, &out_size, true);
     if (res)
         goto out;
 
