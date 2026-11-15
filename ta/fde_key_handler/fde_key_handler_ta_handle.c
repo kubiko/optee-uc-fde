@@ -60,7 +60,7 @@ struct key_handle {
  *  handle: buffer with handle
  *  handle_size: size handle buffer
  */
-static TEE_Result derive_ta_unique_key(uint8_t *key,
+TEE_Result derive_ta_unique_key(uint8_t *key,
                                        uint16_t key_size,
                                        uint8_t *handle,
                                        uint32_t handle_size) {
@@ -341,7 +341,7 @@ TEE_Result get_ta_version( uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
                                  TEE_PARAM_TYPE_NONE))
       return TEE_ERROR_BAD_PARAMETERS;
 
-    params[0].value.a = FDE_TA_VERSION_V1;
+    params[0].value.a = FDE_TA_VERSION_V2;
     return TEE_SUCCESS;
 }
 

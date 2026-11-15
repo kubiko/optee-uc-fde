@@ -18,6 +18,11 @@
 
 /* TA version allowing tracking of future functionality changes */
 #define FDE_TA_VERSION_V1   0x00010001
+/*
+ * v2: keys sealed to a measured boot, retired by a counter in RPMB, see
+ * fde_key_handler_ta_v2.c. A client that finds v1 has no rollback protection.
+ */
+#define FDE_TA_VERSION_V2   0x00020001
 
 /* Define the command index in this TA */
 
@@ -81,6 +86,20 @@
  *    params[0].value.a: TA version as int
  */
 #define TA_CMD_TA_VERSION                6U
+/* v2 */
+#define TA_CMD_EXTEND                    7U
+#define TA_CMD_GET_REGISTER              8U
+#define TA_CMD_KEY_ENCRYPT_V2            9U
+#define TA_CMD_KEY_DECRYPT_V2           10U
+#define TA_CMD_GET_COUNTER              11U
+#define TA_CMD_RAISE_COUNTER            12U
+
+/* the measurement register, a SHA-256 hash chain */
+#define REGISTER_SIZE           32
+/* the largest event an extend takes: a kernel command line, or a slot */
+#define MAX_EVENT_SIZE          4096
+/* the most register values a v2 key may be unsealed for */
+#define MAX_REGISTER_VALUES     16
 
 /* -----------------------------------------------------------------------
  * Commands for Seed-Derived Asymmetric Crypto TA functionality

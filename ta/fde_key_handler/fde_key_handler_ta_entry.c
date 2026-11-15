@@ -76,6 +76,11 @@ TEE_Result TA_InvokeCommandEntryPoint( void *session_context,
                 EMSG("fde_key_handler: TA is locked for further decrypt oprerations!!");
                 return TEE_ERROR_ACCESS_DENIED;
             }
+            // a device that sealed a v2 key with RPMB takes no v1 one
+            if (v1_handles_refused()) {
+                EMSG("fde_key_handler: v1 keys are refused once a v2 key is sealed");
+                return TEE_ERROR_ACCESS_DENIED;
+            }
             return cmd_symmetric_key_crypto(TEE_MODE_DECRYPT, paramTypes, params);
         case TA_CMD_LOCK:
             return lock_ta(paramTypes, params);
@@ -85,6 +90,22 @@ TEE_Result TA_InvokeCommandEntryPoint( void *session_context,
             return generate_random(paramTypes, params);
         case TA_CMD_TA_VERSION:
             return get_ta_version(paramTypes, params);
+        case TA_CMD_EXTEND:
+            return cmd_extend(paramTypes, params);
+        case TA_CMD_GET_REGISTER:
+            return cmd_get_register(paramTypes, params);
+        case TA_CMD_KEY_ENCRYPT_V2:
+            return cmd_key_encrypt_v2(paramTypes, params);
+        case TA_CMD_KEY_DECRYPT_V2:
+            if ( _ta_lock == TA_LOCKED) {
+                EMSG("fde_key_handler: TA is locked for further decrypt oprerations!!");
+                return TEE_ERROR_ACCESS_DENIED;
+            }
+            return cmd_key_decrypt_v2(paramTypes, params);
+        case TA_CMD_GET_COUNTER:
+            return cmd_get_counter(paramTypes, params);
+        case TA_CMD_RAISE_COUNTER:
+            return cmd_raise_counter(paramTypes, params);
         /* Asynchronous crypto functions */
         case TA_CMD_ASYMMETRIC_DERIVE_KEYPAIR:
             return cmd_asymmetric_derive_keypair(ctx, paramTypes, params);
