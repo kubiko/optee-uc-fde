@@ -93,6 +93,7 @@
 #define TA_CMD_KEY_DECRYPT_V2           10U
 #define TA_CMD_GET_COUNTER              11U
 #define TA_CMD_RAISE_COUNTER            12U
+#define TA_CMD_KEY_RESEAL_V2            13U
 
 /* the measurement register, a SHA-256 hash chain */
 #define REGISTER_SIZE           32
