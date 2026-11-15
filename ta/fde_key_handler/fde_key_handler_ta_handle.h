@@ -40,6 +40,7 @@ extern TEE_Result cmd_key_encrypt_v2(uint32_t types, TEE_Param params[TEE_NUM_PA
 extern TEE_Result cmd_key_decrypt_v2(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]);
 extern TEE_Result cmd_get_counter(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]);
 extern TEE_Result cmd_raise_counter(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]);
+extern TEE_Result cmd_key_reseal_v2(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]);
 extern bool v1_handles_refused(void);
 
 /* Asymetric crypto operations */

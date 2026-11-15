@@ -424,80 +424,46 @@ out:
 }
 
 /*
- * cmd_key_decrypt_v2 unseals a key.
- *   params[0] memref input:  the sealed key
- *   params[1] memref input:  the handle
- *   params[2] memref output: the key
+ * open_v2 checks a v2 handle and opens its sealed key into key, out_size
+ * bytes, when the running boot may: the handle is the one sealed, its counter
+ * is not retired, and the register is one of its values. handle is a copy the
+ * normal world cannot change.
  */
-TEE_Result cmd_key_decrypt_v2(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
+static TEE_Result open_v2(struct key_handle_v2 *handle, size_t handle_size,
+                          uint8_t *sealed, size_t sealed_size,
+                          uint8_t *key, size_t *out_size) {
     struct counter_object obj;
-    struct key_handle_v2 *handle = NULL;
-    size_t handle_size = 0, out_size = 0;
     const uint8_t *values = NULL;
     bool rpmb = false, match = false;
     TEE_Result res = TEE_ERROR_GENERIC;
-    uint8_t *key = NULL;
 
-    if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_MEMREF_INPUT,
-                                 TEE_PARAM_TYPE_MEMREF_INPUT,
-                                 TEE_PARAM_TYPE_MEMREF_OUTPUT,
-                                 TEE_PARAM_TYPE_NONE))
-        return TEE_ERROR_BAD_PARAMETERS;
-    if (!params[0].memref.buffer || !params[0].memref.size ||
-        params[0].memref.size > MAX_BUF_SIZE)
-        return TEE_ERROR_BAD_PARAMETERS;
-    handle_size = params[1].memref.size;
-    if (!params[1].memref.buffer || handle_size < sizeof(*handle) ||
-        handle_size > V2_HANDLE_SIZE(MAX_REGISTER_VALUES))
-        return TEE_ERROR_BAD_PARAMETERS;
-    if (params[2].memref.size < params[0].memref.size) {
-        params[2].memref.size = params[0].memref.size;
-        return TEE_ERROR_SHORT_BUFFER;
-    }
-
-    /* work on a copy, the normal world may change the shared one */
-    handle = TEE_Malloc(handle_size, TEE_MALLOC_FILL_ZERO);
-    if (!handle)
-        return TEE_ERROR_OUT_OF_MEMORY;
-    memcpy(handle, params[1].memref.buffer, handle_size);
     if (handle->version != V2_HANDLE_VERSION || handle->n_values == 0 ||
         handle->n_values > MAX_REGISTER_VALUES ||
-        handle_size != V2_HANDLE_SIZE(handle->n_values)) {
-        res = TEE_ERROR_BAD_PARAMETERS;
-        goto out;
-    }
+        handle_size != V2_HANDLE_SIZE(handle->n_values))
+        return TEE_ERROR_BAD_PARAMETERS;
 
     res = counter_state(&obj, &rpmb);
     if (res)
-        goto out;
+        return res;
     if (handle->flags & V2_FLAG_COUNTER) {
         if (!rpmb) {
             EMSG("fde_key_handler: the key needs the counter, and RPMB is not there");
-            res = TEE_ERROR_ACCESS_DENIED;
-            goto out;
+            return TEE_ERROR_ACCESS_DENIED;
         }
         if (get_le64(handle->counter) < obj.counter) {
             EMSG("fde_key_handler: the key was retired by the counter");
-            res = TEE_ERROR_ACCESS_DENIED;
-            goto out;
+            return TEE_ERROR_ACCESS_DENIED;
         }
     } else if (rpmb && obj.armed) {
         EMSG("fde_key_handler: the key was sealed without the counter");
-        res = TEE_ERROR_ACCESS_DENIED;
-        goto out;
+        return TEE_ERROR_ACCESS_DENIED;
     }
 
-    key = TEE_Malloc(params[0].memref.size, TEE_MALLOC_FILL_ZERO);
-    if (!key) {
-        res = TEE_ERROR_OUT_OF_MEMORY;
-        goto out;
-    }
-    out_size = params[0].memref.size;
+    *out_size = sealed_size;
     /* the policy is checked only once the tag says it is the sealed one */
-    res = v2_crypto(TEE_MODE_DECRYPT, handle, params[0].memref.buffer,
-                    params[0].memref.size, key, &out_size);
+    res = v2_crypto(TEE_MODE_DECRYPT, handle, sealed, sealed_size, key, out_size);
     if (res)
-        goto out;
+        return res;
 
     values = (const uint8_t *)handle + sizeof(*handle);
     for (size_t i = 0; i < handle->n_values; i++) {
@@ -506,16 +472,168 @@ TEE_Result cmd_key_decrypt_v2(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) 
     }
     if (!match) {
         EMSG("fde_key_handler: the boot measured is not one the key is sealed to");
-        res = TEE_ERROR_ACCESS_DENIED;
+        memzero_explicit(key, sealed_size);
+        return TEE_ERROR_ACCESS_DENIED;
+    }
+    return TEE_SUCCESS;
+}
+
+/* copy_handle copies a v2 handle the normal world shares */
+static struct key_handle_v2 *copy_handle(const TEE_Param *param) {
+    struct key_handle_v2 *handle = NULL;
+
+    if (!param->memref.buffer || param->memref.size < sizeof(*handle) ||
+        param->memref.size > V2_HANDLE_SIZE(MAX_REGISTER_VALUES))
+        return NULL;
+    handle = TEE_Malloc(param->memref.size, TEE_MALLOC_FILL_ZERO);
+    if (handle)
+        memcpy(handle, param->memref.buffer, param->memref.size);
+    return handle;
+}
+
+/*
+ * cmd_key_decrypt_v2 unseals a key.
+ *   params[0] memref input:  the sealed key
+ *   params[1] memref input:  the handle
+ *   params[2] memref output: the key
+ */
+TEE_Result cmd_key_decrypt_v2(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
+    struct key_handle_v2 *handle = NULL;
+    size_t out_size = 0, sealed_size = 0;
+    TEE_Result res = TEE_ERROR_GENERIC;
+    uint8_t *key = NULL;
+
+    if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_MEMREF_INPUT,
+                                 TEE_PARAM_TYPE_MEMREF_INPUT,
+                                 TEE_PARAM_TYPE_MEMREF_OUTPUT,
+                                 TEE_PARAM_TYPE_NONE))
+        return TEE_ERROR_BAD_PARAMETERS;
+    sealed_size = params[0].memref.size;
+    if (!params[0].memref.buffer || !sealed_size || sealed_size > MAX_BUF_SIZE)
+        return TEE_ERROR_BAD_PARAMETERS;
+    if (params[2].memref.size < sealed_size) {
+        params[2].memref.size = sealed_size;
+        return TEE_ERROR_SHORT_BUFFER;
+    }
+    handle = copy_handle(&params[1]);
+    if (!handle)
+        return TEE_ERROR_BAD_PARAMETERS;
+    key = TEE_Malloc(sealed_size, TEE_MALLOC_FILL_ZERO);
+    if (!key) {
+        res = TEE_ERROR_OUT_OF_MEMORY;
         goto out;
     }
+    res = open_v2(handle, params[1].memref.size, params[0].memref.buffer,
+                  sealed_size, key, &out_size);
+    if (res)
+        goto out;
     memcpy(params[2].memref.buffer, key, out_size);
     params[2].memref.size = out_size;
 out:
     if (key) {
-        memzero_explicit(key, params[0].memref.size);
+        memzero_explicit(key, sealed_size);
         TEE_Free(key);
     }
+    TEE_Free(handle);
+    return res;
+}
+
+/*
+ * cmd_key_reseal_v2 seals a key again, to new register values or a new
+ * counter, without revealing it: the running boot has to be one the old handle
+ * unseals for, so this works once the TA is locked, as a reseal of a refresh
+ * needs. The new counter is not below the one in RPMB.
+ *   params[0] memref input:  the sealed key
+ *   params[1] memref input:  the handle
+ *   params[2] memref input:  the new policy, as for TA_CMD_KEY_ENCRYPT_V2
+ *   params[3] memref output: the new handle, then the newly sealed key
+ */
+TEE_Result cmd_key_reseal_v2(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
+    struct counter_object obj;
+    struct key_handle_v2 *handle = NULL, *fresh = NULL;
+    size_t sealed_size = 0, out_size = 0, n = 0, fresh_size = 0;
+    uint8_t *policy = NULL, *key = NULL, *out = NULL;
+    uint8_t rng[V2_IV_SIZE + V2_NONCE_SIZE] = { };
+    size_t policy_size = 0;
+    uint64_t counter = 0;
+    bool rpmb = false;
+    TEE_Result res = TEE_ERROR_GENERIC;
+
+    if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_MEMREF_INPUT,
+                                 TEE_PARAM_TYPE_MEMREF_INPUT,
+                                 TEE_PARAM_TYPE_MEMREF_INPUT,
+                                 TEE_PARAM_TYPE_MEMREF_OUTPUT))
+        return TEE_ERROR_BAD_PARAMETERS;
+    sealed_size = params[0].memref.size;
+    if (!params[0].memref.buffer || !sealed_size || sealed_size > MAX_BUF_SIZE)
+        return TEE_ERROR_BAD_PARAMETERS;
+    policy = params[2].memref.buffer;
+    policy_size = params[2].memref.size;
+    if (!policy || policy_size < 8 + REGISTER_SIZE ||
+        (policy_size - 8) % REGISTER_SIZE)
+        return TEE_ERROR_BAD_PARAMETERS;
+    n = (policy_size - 8) / REGISTER_SIZE;
+    if (n > MAX_REGISTER_VALUES)
+        return TEE_ERROR_BAD_PARAMETERS;
+    fresh_size = V2_HANDLE_SIZE(n);
+    if (params[3].memref.size < fresh_size + sealed_size) {
+        params[3].memref.size = fresh_size + sealed_size;
+        return TEE_ERROR_SHORT_BUFFER;
+    }
+    counter = get_le64(policy);
+
+    handle = copy_handle(&params[1]);
+    if (!handle)
+        return TEE_ERROR_BAD_PARAMETERS;
+    key = TEE_Malloc(sealed_size, TEE_MALLOC_FILL_ZERO);
+    out = TEE_Malloc(sealed_size, TEE_MALLOC_FILL_ZERO);
+    fresh = TEE_Malloc(fresh_size, TEE_MALLOC_FILL_ZERO);
+    if (!key || !out || !fresh) {
+        res = TEE_ERROR_OUT_OF_MEMORY;
+        goto out;
+    }
+    res = open_v2(handle, params[1].memref.size, params[0].memref.buffer,
+                  sealed_size, key, &out_size);
+    if (res)
+        goto out;
+
+    res = counter_state(&obj, &rpmb);
+    if (res)
+        goto out;
+    if (rpmb && counter < obj.counter) {
+        EMSG("fde_key_handler: refusing to seal below the counter");
+        res = TEE_ERROR_BAD_PARAMETERS;
+        goto out;
+    }
+    fresh->version = V2_HANDLE_VERSION;
+    fresh->flags = rpmb ? V2_FLAG_COUNTER : 0;
+    fresh->n_values = (uint8_t)n;
+    put_le64(fresh->counter, rpmb ? counter : 0);
+    TEE_GenerateRandom(rng, sizeof(rng));
+    memcpy(fresh->iv, rng, V2_IV_SIZE);
+    memcpy(fresh->nonce, rng + V2_IV_SIZE, V2_NONCE_SIZE);
+    memzero_explicit(rng, sizeof(rng));
+    memcpy((uint8_t *)fresh + sizeof(*fresh), policy + 8, n * REGISTER_SIZE);
+
+    res = v2_crypto(TEE_MODE_ENCRYPT, fresh, key, out_size, out, &out_size);
+    if (res)
+        goto out;
+    if (rpmb && !obj.armed) {
+        obj.armed = 1;
+        res = write_counter(&obj);
+        if (res)
+            goto out;
+    }
+    memcpy(params[3].memref.buffer, fresh, fresh_size);
+    memcpy((uint8_t *)params[3].memref.buffer + fresh_size, out, out_size);
+    params[3].memref.size = fresh_size + out_size;
+out:
+    if (key) {
+        memzero_explicit(key, sealed_size);
+        TEE_Free(key);
+    }
+    TEE_Free(out);
+    TEE_Free(fresh);
     TEE_Free(handle);
     return res;
 }

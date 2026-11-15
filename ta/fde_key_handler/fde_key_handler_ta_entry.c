@@ -106,6 +106,9 @@ TEE_Result TA_InvokeCommandEntryPoint( void *session_context,
             return cmd_get_counter(paramTypes, params);
         case TA_CMD_RAISE_COUNTER:
             return cmd_raise_counter(paramTypes, params);
+        case TA_CMD_KEY_RESEAL_V2:
+            // reveals nothing, so the running boot may reseal once locked
+            return cmd_key_reseal_v2(paramTypes, params);
         /* Asynchronous crypto functions */
         case TA_CMD_ASYMMETRIC_DERIVE_KEYPAIR:
             return cmd_asymmetric_derive_keypair(ctx, paramTypes, params);
