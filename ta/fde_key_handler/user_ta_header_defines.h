@@ -10,10 +10,21 @@
 
 #define TA_UUID FDE_KEY_HANDLER_UUID_ID
 
+/*
+ * Single instance and kept alive, so the measurement register lasts the boot,
+ * and kept crashed: a TA that panics is not created again with an empty
+ * register, which later code could extend with values it can predict, but
+ * fails every call until the reboot. TA_FLAG_INSTANCE_KEEP_CRASHED needs an
+ * OP-TEE OS that knows it.
+ */
+#ifndef TA_FLAG_INSTANCE_KEEP_CRASHED
+#error "TA v2 needs an OP-TEE OS with TA_FLAG_INSTANCE_KEEP_CRASHED"
+#endif
 #define TA_FLAGS                    (TA_FLAG_SINGLE_INSTANCE | \
                                      TA_FLAG_MULTI_SESSION | \
                                      TA_FLAG_DEVICE_ENUM | \
-                                     TA_FLAG_INSTANCE_KEEP_ALIVE)
+                                     TA_FLAG_INSTANCE_KEEP_ALIVE | \
+                                     TA_FLAG_INSTANCE_KEEP_CRASHED)
 /*
  * RSA key derivation dominates the memory budget: each primality test on a
  * half-key-size candidate drives a modular exponentiation whose window

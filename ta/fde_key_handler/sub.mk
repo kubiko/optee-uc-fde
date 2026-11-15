@@ -3,3 +3,4 @@ global-incdirs-y += .
 
 srcs-y += fde_key_handler_ta_entry.c
 srcs-y += fde_key_handler_ta_handle.c
+srcs-y += fde_key_handler_ta_v2.c

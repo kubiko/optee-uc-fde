@@ -30,6 +30,17 @@ extern TEE_Result generate_random(uint32_t types,
                                   TEE_Param params[TEE_NUM_PARAMS]);
 extern TEE_Result get_ta_version(uint32_t types,
                                   TEE_Param params[TEE_NUM_PARAMS]);
+extern TEE_Result derive_ta_unique_key(uint8_t *key, uint16_t key_size,
+                                       uint8_t *handle, uint32_t handle_size);
+
+/* v2, fde_key_handler_ta_v2.c */
+extern TEE_Result cmd_extend(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]);
+extern TEE_Result cmd_get_register(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]);
+extern TEE_Result cmd_key_encrypt_v2(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]);
+extern TEE_Result cmd_key_decrypt_v2(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]);
+extern TEE_Result cmd_get_counter(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]);
+extern TEE_Result cmd_raise_counter(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]);
+extern bool v1_handles_refused(void);
 
 /* Asymetric crypto operations */
 extern TEE_Result cmd_asymmetric_derive_keypair(session_ctx_t *ctx,

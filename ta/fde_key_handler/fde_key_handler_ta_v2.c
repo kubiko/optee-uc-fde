@@ -1,0 +1,521 @@
+/* SPDX-License-Identifier: BSD-2-Clause
+ *
+ * Copyright 2026, Canonical Ltd.
+ */
+
+/*
+ * TA v2: keys sealed to a measured boot, and retired by a counter in RPMB.
+ *
+ * The measurement register is extend-only and lives as long as the TA
+ * instance, which is single instance, kept alive, and kept crashed: a TA that
+ * panics is not created again with an empty register before the reboot.
+ * U-Boot extends it first, with the FIT it boots and the final bootargs; the
+ * initrd then extends it with the system slot it maps. Each extend is
+ *
+ *     register = SHA-256(register || SHA-256(event))
+ *
+ * from 32 zero bytes, as a PCR.
+ *
+ * A v2 key handle carries the register values the key may be unsealed for,
+ * and the counter value it was sealed at, both authenticated as AES-GCM
+ * additional data. The key unseals only while the register is one of those
+ * values, and, when the device has RPMB, while the counter in RPMB is not
+ * above the handle's. Raising the counter retires every key sealed at a
+ * lower value. A device that sealed a v2 key with RPMB is "armed": it refuses
+ * v1 handles and v2 handles sealed without the counter from then on.
+ *
+ * Without RPMB secure storage (CFG_RPMB_FS=n, or no RPMB key programmed on an
+ * open board) keys are sealed and unsealed without the counter, the register
+ * still enforced.
+ */
+
+#include <pta_system.h>
+#include <stddef.h>
+#include <string.h>
+#include <string_ext.h>
+#include <tee_internal_api.h>
+#include <tee_internal_api_extensions.h>
+#include <trace.h>
+
+#include "fde_key_handler_ta_type.h"
+#include "fde_key_handler_ta_handle.h"
+
+#define V2_IV_SIZE      16
+#define V2_NONCE_SIZE   32
+#define V2_TAG_SIZE     16
+#define V2_HANDLE_VERSION 'V'
+#define V2_FLAG_COUNTER 0x01
+
+/*
+ * The header of a v2 key handle, followed by n_values register values of
+ * REGISTER_SIZE bytes each. Every field but the tag is additional data of the
+ * AES-GCM encryption of the key.
+ */
+struct key_handle_v2 {
+    uint8_t version;
+    uint8_t flags;
+    uint8_t n_values;
+    uint8_t reserved;
+    uint8_t counter[8]; /* little endian */
+    uint8_t iv[V2_IV_SIZE];
+    uint8_t nonce[V2_NONCE_SIZE];
+    uint8_t tag[V2_TAG_SIZE];
+} __attribute__((packed));
+
+#define V2_HANDLE_SIZE(n) (sizeof(struct key_handle_v2) + (size_t)(n) * REGISTER_SIZE)
+
+/* the counter object in RPMB */
+#define COUNTER_OBJECT_ID   "uc-fde-v2-counter"
+#define COUNTER_MAGIC       0x55434644 /* "UCFD" */
+struct counter_object {
+    uint32_t magic;
+    uint32_t armed;
+    uint64_t counter;
+};
+
+static uint8_t _register[REGISTER_SIZE];
+static uint32_t _extends;
+
+static TEE_Result sha256(const void *a, size_t a_len, const void *b,
+                         size_t b_len, uint8_t out[REGISTER_SIZE]) {
+    TEE_OperationHandle op = TEE_HANDLE_NULL;
+    TEE_Result res = TEE_ERROR_GENERIC;
+    size_t out_len = REGISTER_SIZE;
+
+    res = TEE_AllocateOperation(&op, TEE_ALG_SHA256, TEE_MODE_DIGEST, 0);
+    if (res)
+        return res;
+    if (a_len)
+        TEE_DigestUpdate(op, a, a_len);
+    res = TEE_DigestDoFinal(op, b, b_len, out, &out_len);
+    TEE_FreeOperation(op);
+    if (!res && out_len != REGISTER_SIZE)
+        res = TEE_ERROR_SECURITY;
+    return res;
+}
+
+TEE_Result cmd_extend(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
+    uint8_t digest[REGISTER_SIZE] = { };
+    TEE_Result res = TEE_ERROR_GENERIC;
+
+    if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_MEMREF_INPUT,
+                                 TEE_PARAM_TYPE_NONE,
+                                 TEE_PARAM_TYPE_NONE,
+                                 TEE_PARAM_TYPE_NONE))
+        return TEE_ERROR_BAD_PARAMETERS;
+    if ((!params[0].memref.buffer && params[0].memref.size) ||
+        params[0].memref.size > MAX_EVENT_SIZE)
+        return TEE_ERROR_BAD_PARAMETERS;
+
+    res = sha256(NULL, 0, params[0].memref.buffer, params[0].memref.size, digest);
+    if (res)
+        return res;
+    res = sha256(_register, sizeof(_register), digest, sizeof(digest), _register);
+    if (res) {
+        /* a register that may be half written measures nothing any more */
+        TEE_Panic(res);
+    }
+    _extends++;
+    DMSG("fde_key_handler: register extended, %"PRIu32" events", _extends);
+    return TEE_SUCCESS;
+}
+
+TEE_Result cmd_get_register(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
+    if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_MEMREF_OUTPUT,
+                                 TEE_PARAM_TYPE_VALUE_OUTPUT,
+                                 TEE_PARAM_TYPE_NONE,
+                                 TEE_PARAM_TYPE_NONE))
+        return TEE_ERROR_BAD_PARAMETERS;
+    if (params[0].memref.size < REGISTER_SIZE) {
+        params[0].memref.size = REGISTER_SIZE;
+        return TEE_ERROR_SHORT_BUFFER;
+    }
+    memcpy(params[0].memref.buffer, _register, REGISTER_SIZE);
+    params[0].memref.size = REGISTER_SIZE;
+    params[1].value.a = _extends;
+    params[1].value.b = 0;
+    return TEE_SUCCESS;
+}
+
+/*
+ * read_counter reads the counter object. It returns TEE_ERROR_ITEM_NOT_FOUND,
+ * with a zero counter, not armed, when there is no object, which is also what
+ * a device without RPMB secure storage gives, and
+ * TEE_ERROR_STORAGE_NOT_AVAILABLE when RPMB cannot be read.
+ */
+static TEE_Result read_counter(struct counter_object *obj) {
+    TEE_ObjectHandle h = TEE_HANDLE_NULL;
+    TEE_Result res = TEE_ERROR_GENERIC;
+    size_t read = 0;
+
+    memset(obj, 0, sizeof(*obj));
+    obj->magic = COUNTER_MAGIC;
+    res = TEE_OpenPersistentObject(TEE_STORAGE_PRIVATE_RPMB, COUNTER_OBJECT_ID,
+                                   strlen(COUNTER_OBJECT_ID),
+                                   TEE_DATA_FLAG_ACCESS_READ, &h);
+    if (res == TEE_ERROR_ITEM_NOT_FOUND)
+        return res;
+    if (res)
+        return TEE_ERROR_STORAGE_NOT_AVAILABLE;
+    res = TEE_ReadObjectData(h, obj, sizeof(*obj), &read);
+    TEE_CloseObject(h);
+    if (res || read != sizeof(*obj) || obj->magic != COUNTER_MAGIC) {
+        EMSG("fde_key_handler: the counter in RPMB is unreadable: %#"PRIx32, res);
+        return TEE_ERROR_CORRUPT_OBJECT;
+    }
+    return TEE_SUCCESS;
+}
+
+/* write_counter writes the counter object, creating it when it does not exist */
+static TEE_Result write_counter(const struct counter_object *obj) {
+    TEE_ObjectHandle h = TEE_HANDLE_NULL;
+    TEE_Result res = TEE_ERROR_GENERIC;
+
+    res = TEE_CreatePersistentObject(TEE_STORAGE_PRIVATE_RPMB, COUNTER_OBJECT_ID,
+                                     strlen(COUNTER_OBJECT_ID),
+                                     TEE_DATA_FLAG_ACCESS_WRITE |
+                                     TEE_DATA_FLAG_OVERWRITE,
+                                     TEE_HANDLE_NULL, obj, sizeof(*obj), &h);
+    if (res)
+        return TEE_ERROR_STORAGE_NOT_AVAILABLE;
+    TEE_CloseObject(h);
+    return TEE_SUCCESS;
+}
+
+/*
+ * counter_state returns the counter, whether the device is armed, and
+ * whether it has RPMB at all. An object that exists is RPMB. Without one,
+ * the first call of the boot that finds RPMB writes a zero counter, unarmed,
+ * which is what reading it would have given; no RPMB, or RPMB that cannot be
+ * read, is a device without the counter. Once a device is armed, the latter
+ * only fails the keys that need the counter.
+ */
+static TEE_Result counter_state(struct counter_object *obj, bool *rpmb) {
+    TEE_Result res = read_counter(obj);
+
+    *rpmb = false;
+    if (res == TEE_ERROR_STORAGE_NOT_AVAILABLE)
+        return TEE_SUCCESS;
+    if (res == TEE_ERROR_ITEM_NOT_FOUND) {
+        if (write_counter(obj) != TEE_SUCCESS)
+            return TEE_SUCCESS;
+        res = TEE_SUCCESS;
+    }
+    if (res)
+        return res;
+    *rpmb = true;
+    return TEE_SUCCESS;
+}
+
+/* v1_handles_refused returns true once a v2 key was sealed with RPMB */
+bool v1_handles_refused(void) {
+    struct counter_object obj;
+    bool rpmb = false;
+
+    if (counter_state(&obj, &rpmb) != TEE_SUCCESS)
+        return true;
+    return rpmb && obj.armed;
+}
+
+TEE_Result cmd_get_counter(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
+    struct counter_object obj;
+    TEE_Result res = TEE_ERROR_GENERIC;
+    bool rpmb = false;
+
+    if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_OUTPUT,
+                                 TEE_PARAM_TYPE_VALUE_OUTPUT,
+                                 TEE_PARAM_TYPE_NONE,
+                                 TEE_PARAM_TYPE_NONE))
+        return TEE_ERROR_BAD_PARAMETERS;
+    res = counter_state(&obj, &rpmb);
+    if (res)
+        return res;
+    params[0].value.a = (uint32_t)obj.counter;
+    params[0].value.b = (uint32_t)(obj.counter >> 32);
+    params[1].value.a = rpmb ? 1 : 0;
+    params[1].value.b = obj.armed ? 1 : 0;
+    return TEE_SUCCESS;
+}
+
+TEE_Result cmd_raise_counter(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
+    struct counter_object obj;
+    TEE_Result res = TEE_ERROR_GENERIC;
+    bool rpmb = false;
+    uint64_t value = 0;
+
+    if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_VALUE_INPUT,
+                                 TEE_PARAM_TYPE_NONE,
+                                 TEE_PARAM_TYPE_NONE,
+                                 TEE_PARAM_TYPE_NONE))
+        return TEE_ERROR_BAD_PARAMETERS;
+    value = ((uint64_t)params[0].value.b << 32) | params[0].value.a;
+    res = counter_state(&obj, &rpmb);
+    if (res)
+        return res;
+    if (!rpmb)
+        return TEE_ERROR_STORAGE_NOT_AVAILABLE;
+    if (value < obj.counter) {
+        EMSG("fde_key_handler: the counter does not go back");
+        return TEE_ERROR_BAD_PARAMETERS;
+    }
+    if (value == obj.counter)
+        return TEE_SUCCESS;
+    obj.counter = value;
+    return write_counter(&obj);
+}
+
+static void put_le64(uint8_t out[8], uint64_t v) {
+    for (int i = 0; i < 8; i++)
+        out[i] = (uint8_t)(v >> (8 * i));
+}
+
+static uint64_t get_le64(const uint8_t in[8]) {
+    uint64_t v = 0;
+
+    for (int i = 0; i < 8; i++)
+        v |= (uint64_t)in[i] << (8 * i);
+    return v;
+}
+
+/*
+ * v2_crypto encrypts or decrypts a key under the key derived for the handle's
+ * nonce, with everything of the handle but its tag as additional data.
+ */
+static TEE_Result v2_crypto(TEE_OperationMode mode, struct key_handle_v2 *handle,
+                            uint8_t *in, size_t in_size,
+                            uint8_t *out, size_t *out_size) {
+    TEE_OperationHandle op = TEE_HANDLE_NULL;
+    TEE_ObjectHandle hkey = TEE_HANDLE_NULL;
+    uint8_t derived[TA_DERIVED_KEY_MAX_SIZE] = { };
+    TEE_Attribute attr = { };
+    TEE_Result res = TEE_ERROR_GENERIC;
+    uint8_t tag[V2_TAG_SIZE] = { };
+    size_t tag_len = V2_TAG_SIZE;
+    size_t aad_head = offsetof(struct key_handle_v2, tag);
+
+    res = TEE_AllocateOperation(&op, TEE_ALG_AES_GCM, mode, sizeof(derived) * 8);
+    if (res)
+        return res;
+    res = derive_ta_unique_key(derived, sizeof(derived), handle->nonce,
+                               sizeof(handle->nonce));
+    if (res)
+        goto out_op;
+    res = TEE_AllocateTransientObject(TEE_TYPE_AES, sizeof(derived) * 8, &hkey);
+    if (res)
+        goto out_op;
+    attr.attributeID = TEE_ATTR_SECRET_VALUE;
+    attr.content.ref.buffer = derived;
+    attr.content.ref.length = sizeof(derived);
+    res = TEE_PopulateTransientObject(hkey, &attr, 1);
+    if (res)
+        goto out_key;
+    res = TEE_SetOperationKey(op, hkey);
+    if (res)
+        goto out_key;
+    res = TEE_AEInit(op, handle->iv, V2_IV_SIZE, V2_TAG_SIZE * 8, 0, 0);
+    if (res)
+        goto out_key;
+    TEE_AEUpdateAAD(op, handle, aad_head);
+    TEE_AEUpdateAAD(op, (uint8_t *)handle + sizeof(*handle),
+                    (size_t)handle->n_values * REGISTER_SIZE);
+    if (mode == TEE_MODE_ENCRYPT) {
+        res = TEE_AEEncryptFinal(op, in, in_size, out, out_size, handle->tag, &tag_len);
+        if (!res && (tag_len != V2_TAG_SIZE || *out_size != in_size))
+            res = TEE_ERROR_SECURITY;
+    } else {
+        memcpy(tag, handle->tag, V2_TAG_SIZE);
+        res = TEE_AEDecryptFinal(op, in, in_size, out, out_size, tag, V2_TAG_SIZE);
+        if (!res && *out_size != in_size)
+            res = TEE_ERROR_SECURITY;
+    }
+
+out_key:
+    TEE_FreeTransientObject(hkey);
+out_op:
+    TEE_FreeOperation(op);
+    memzero_explicit(derived, sizeof(derived));
+    return res;
+}
+
+/*
+ * cmd_key_encrypt_v2 seals a key.
+ *   params[0] memref input:  the key
+ *   params[1] memref input:  the policy: the counter, 8 bytes little endian,
+ *                            then 1 to MAX_REGISTER_VALUES register values
+ *   params[2] memref output: the handle, V2_HANDLE_SIZE(values)
+ *   params[3] memref output: the sealed key, the size of the key
+ * A counter below the one in RPMB is refused: such a key would never unseal.
+ */
+TEE_Result cmd_key_encrypt_v2(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
+    struct counter_object obj;
+    struct key_handle_v2 *handle = NULL;
+    uint8_t *policy = NULL;
+    size_t policy_size = 0, n = 0, handle_size = 0;
+    size_t out_size = 0;
+    uint8_t rng[V2_IV_SIZE + V2_NONCE_SIZE] = { };
+    uint64_t counter = 0;
+    bool rpmb = false;
+    TEE_Result res = TEE_ERROR_GENERIC;
+
+    if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_MEMREF_INPUT,
+                                 TEE_PARAM_TYPE_MEMREF_INPUT,
+                                 TEE_PARAM_TYPE_MEMREF_OUTPUT,
+                                 TEE_PARAM_TYPE_MEMREF_OUTPUT))
+        return TEE_ERROR_BAD_PARAMETERS;
+    if (!params[0].memref.buffer || !params[0].memref.size ||
+        params[0].memref.size > MAX_BUF_SIZE)
+        return TEE_ERROR_BAD_PARAMETERS;
+    policy = params[1].memref.buffer;
+    policy_size = params[1].memref.size;
+    if (!policy || policy_size < 8 + REGISTER_SIZE ||
+        (policy_size - 8) % REGISTER_SIZE)
+        return TEE_ERROR_BAD_PARAMETERS;
+    n = (policy_size - 8) / REGISTER_SIZE;
+    if (n > MAX_REGISTER_VALUES)
+        return TEE_ERROR_BAD_PARAMETERS;
+    handle_size = V2_HANDLE_SIZE(n);
+    if (params[2].memref.size < handle_size || params[3].memref.size < params[0].memref.size) {
+        params[2].memref.size = handle_size;
+        params[3].memref.size = params[0].memref.size;
+        return TEE_ERROR_SHORT_BUFFER;
+    }
+    counter = get_le64(policy);
+
+    res = counter_state(&obj, &rpmb);
+    if (res)
+        return res;
+    if (rpmb && counter < obj.counter) {
+        EMSG("fde_key_handler: refusing to seal below the counter");
+        return TEE_ERROR_BAD_PARAMETERS;
+    }
+
+    handle = TEE_Malloc(handle_size, TEE_MALLOC_FILL_ZERO);
+    if (!handle)
+        return TEE_ERROR_OUT_OF_MEMORY;
+    handle->version = V2_HANDLE_VERSION;
+    handle->flags = rpmb ? V2_FLAG_COUNTER : 0;
+    handle->n_values = (uint8_t)n;
+    put_le64(handle->counter, rpmb ? counter : 0);
+    TEE_GenerateRandom(rng, sizeof(rng));
+    memcpy(handle->iv, rng, V2_IV_SIZE);
+    memcpy(handle->nonce, rng + V2_IV_SIZE, V2_NONCE_SIZE);
+    memzero_explicit(rng, sizeof(rng));
+    memcpy((uint8_t *)handle + sizeof(*handle), policy + 8, n * REGISTER_SIZE);
+
+    out_size = params[0].memref.size;
+    res = v2_crypto(TEE_MODE_ENCRYPT, handle, params[0].memref.buffer,
+                    params[0].memref.size, params[3].memref.buffer, &out_size);
+    if (res)
+        goto out;
+
+    if (rpmb && !obj.armed) {
+        /* from now on, keys sealed without the counter go */
+        obj.armed = 1;
+        res = write_counter(&obj);
+        if (res)
+            goto out;
+    }
+    memcpy(params[2].memref.buffer, handle, handle_size);
+    params[2].memref.size = handle_size;
+    params[3].memref.size = out_size;
+out:
+    TEE_Free(handle);
+    return res;
+}
+
+/*
+ * cmd_key_decrypt_v2 unseals a key.
+ *   params[0] memref input:  the sealed key
+ *   params[1] memref input:  the handle
+ *   params[2] memref output: the key
+ */
+TEE_Result cmd_key_decrypt_v2(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
+    struct counter_object obj;
+    struct key_handle_v2 *handle = NULL;
+    size_t handle_size = 0, out_size = 0;
+    const uint8_t *values = NULL;
+    bool rpmb = false, match = false;
+    TEE_Result res = TEE_ERROR_GENERIC;
+    uint8_t *key = NULL;
+
+    if (types != TEE_PARAM_TYPES(TEE_PARAM_TYPE_MEMREF_INPUT,
+                                 TEE_PARAM_TYPE_MEMREF_INPUT,
+                                 TEE_PARAM_TYPE_MEMREF_OUTPUT,
+                                 TEE_PARAM_TYPE_NONE))
+        return TEE_ERROR_BAD_PARAMETERS;
+    if (!params[0].memref.buffer || !params[0].memref.size ||
+        params[0].memref.size > MAX_BUF_SIZE)
+        return TEE_ERROR_BAD_PARAMETERS;
+    handle_size = params[1].memref.size;
+    if (!params[1].memref.buffer || handle_size < sizeof(*handle) ||
+        handle_size > V2_HANDLE_SIZE(MAX_REGISTER_VALUES))
+        return TEE_ERROR_BAD_PARAMETERS;
+    if (params[2].memref.size < params[0].memref.size) {
+        params[2].memref.size = params[0].memref.size;
+        return TEE_ERROR_SHORT_BUFFER;
+    }
+
+    /* work on a copy, the normal world may change the shared one */
+    handle = TEE_Malloc(handle_size, TEE_MALLOC_FILL_ZERO);
+    if (!handle)
+        return TEE_ERROR_OUT_OF_MEMORY;
+    memcpy(handle, params[1].memref.buffer, handle_size);
+    if (handle->version != V2_HANDLE_VERSION || handle->n_values == 0 ||
+        handle->n_values > MAX_REGISTER_VALUES ||
+        handle_size != V2_HANDLE_SIZE(handle->n_values)) {
+        res = TEE_ERROR_BAD_PARAMETERS;
+        goto out;
+    }
+
+    res = counter_state(&obj, &rpmb);
+    if (res)
+        goto out;
+    if (handle->flags & V2_FLAG_COUNTER) {
+        if (!rpmb) {
+            EMSG("fde_key_handler: the key needs the counter, and RPMB is not there");
+            res = TEE_ERROR_ACCESS_DENIED;
+            goto out;
+        }
+        if (get_le64(handle->counter) < obj.counter) {
+            EMSG("fde_key_handler: the key was retired by the counter");
+            res = TEE_ERROR_ACCESS_DENIED;
+            goto out;
+        }
+    } else if (rpmb && obj.armed) {
+        EMSG("fde_key_handler: the key was sealed without the counter");
+        res = TEE_ERROR_ACCESS_DENIED;
+        goto out;
+    }
+
+    key = TEE_Malloc(params[0].memref.size, TEE_MALLOC_FILL_ZERO);
+    if (!key) {
+        res = TEE_ERROR_OUT_OF_MEMORY;
+        goto out;
+    }
+    out_size = params[0].memref.size;
+    /* the policy is checked only once the tag says it is the sealed one */
+    res = v2_crypto(TEE_MODE_DECRYPT, handle, params[0].memref.buffer,
+                    params[0].memref.size, key, &out_size);
+    if (res)
+        goto out;
+
+    values = (const uint8_t *)handle + sizeof(*handle);
+    for (size_t i = 0; i < handle->n_values; i++) {
+        if (!consttime_memcmp(values + i * REGISTER_SIZE, _register, REGISTER_SIZE))
+            match = true;
+    }
+    if (!match) {
+        EMSG("fde_key_handler: the boot measured is not one the key is sealed to");
+        res = TEE_ERROR_ACCESS_DENIED;
+        goto out;
+    }
+    memcpy(params[2].memref.buffer, key, out_size);
+    params[2].memref.size = out_size;
+out:
+    if (key) {
+        memzero_explicit(key, params[0].memref.size);
+        TEE_Free(key);
+    }
+    TEE_Free(handle);
+    return res;
+}
