@@ -99,8 +99,12 @@
 #define REGISTER_SIZE           32
 /* the largest event an extend takes: a kernel command line, or a slot */
 #define MAX_EVENT_SIZE          4096
-/* the most register values a v2 key may be unsealed for */
-#define MAX_REGISTER_VALUES     16
+/*
+ * the most register values a v2 key may be unsealed for: two system slots,
+ * their kernel command lines and two boot modes, times the two claims of
+ * the apps slot an apps trial has
+ */
+#define MAX_REGISTER_VALUES     32
 
 /* -----------------------------------------------------------------------
  * Commands for Seed-Derived Asymmetric Crypto TA functionality
