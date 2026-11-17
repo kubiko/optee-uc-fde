@@ -26,7 +26,8 @@
  *
  * Without RPMB secure storage (CFG_RPMB_FS=n, or no RPMB key programmed on an
  * open board) keys are sealed and unsealed without the counter, the register
- * still enforced.
+ * still enforced, unless the TA is built with CFG_FDE_V2_REQUIRE_RPMB=y, see
+ * counter_state.
  */
 
 #include <pta_system.h>
@@ -150,76 +151,180 @@ TEE_Result cmd_get_register(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
 }
 
 /*
- * read_counter reads the counter object. It returns TEE_ERROR_ITEM_NOT_FOUND,
- * with a zero counter, not armed, when there is no object, which is also what
- * a device without RPMB secure storage gives, and
- * TEE_ERROR_STORAGE_NOT_AVAILABLE when RPMB cannot be read.
+ * The counter object lives in RPMB, whose frames the normal world carries.
+ * Their data and the write counter are authenticated, but OP-TEE takes the
+ * result code of a frame before it checks its MAC, so the normal world can
+ * make any RPMB access fail, with any error, "item not found" included. The
+ * counter is therefore never written from what a failed read implies:
+ *  - an object that is not found is created without overwrite, so an object
+ *    that is there after all makes the create fail, and that is tampering;
+ *  - an update opens the object it changes, reads it again, and writes it
+ *    only when it holds what the caller read;
+ *  - a counter that was there this boot cannot go away before the reboot.
+ *
+ * With FDE_V2_REQUIRE_RPMB, a production build for a device whose RPMB key
+ * is provisioned, RPMB that cannot be used fails every call that needs the
+ * counter, a v1 unseal included, and v2 keys sealed without the counter are
+ * refused. v1 keys still unseal until the first v2 seal arms the device, so a
+ * v1 install can move its keys to v2. Without it, a device with no usable
+ * RPMB from the start of the boot seals and unseals without the counter,
+ * which a normal world that blocks RPMB from the start of the boot gets as
+ * well: the downgrade a development build accepts.
  */
-static TEE_Result read_counter(struct counter_object *obj) {
-    TEE_ObjectHandle h = TEE_HANDLE_NULL;
-    TEE_Result res = TEE_ERROR_GENERIC;
-    size_t read = 0;
+#ifndef FDE_V2_REQUIRE_RPMB
+#define FDE_V2_REQUIRE_RPMB 0
+#endif
 
-    memset(obj, 0, sizeof(*obj));
-    obj->magic = COUNTER_MAGIC;
-    res = TEE_OpenPersistentObject(TEE_STORAGE_PRIVATE_RPMB, COUNTER_OBJECT_ID,
-                                   strlen(COUNTER_OBJECT_ID),
-                                   TEE_DATA_FLAG_ACCESS_READ, &h);
-    if (res == TEE_ERROR_ITEM_NOT_FOUND)
-        return res;
-    if (res)
-        return TEE_ERROR_STORAGE_NOT_AVAILABLE;
-    res = TEE_ReadObjectData(h, obj, sizeof(*obj), &read);
-    TEE_CloseObject(h);
-    if (res || read != sizeof(*obj) || obj->magic != COUNTER_MAGIC) {
-        EMSG("fde_key_handler: the counter in RPMB is unreadable: %#"PRIx32, res);
-        return TEE_ERROR_CORRUPT_OBJECT;
-    }
-    return TEE_SUCCESS;
+/* the counter was read or written this boot */
+static bool _rpmb_seen;
+/* RPMB answered in a way only tampering gives: refuse until the reboot */
+static bool _rpmb_tampered;
+
+static TEE_Result tampered(const char *what) {
+    EMSG("fde_key_handler: RPMB tampered with: %s, refusing until reboot", what);
+    _rpmb_tampered = true;
+    return TEE_ERROR_SECURITY;
 }
 
-/* write_counter writes the counter object, creating it when it does not exist */
-static TEE_Result write_counter(const struct counter_object *obj) {
-    TEE_ObjectHandle h = TEE_HANDLE_NULL;
-    TEE_Result res = TEE_ERROR_GENERIC;
-
-    res = TEE_CreatePersistentObject(TEE_STORAGE_PRIVATE_RPMB, COUNTER_OBJECT_ID,
-                                     strlen(COUNTER_OBJECT_ID),
-                                     TEE_DATA_FLAG_ACCESS_WRITE |
-                                     TEE_DATA_FLAG_OVERWRITE,
-                                     TEE_HANDLE_NULL, obj, sizeof(*obj), &h);
-    if (res)
-        return TEE_ERROR_STORAGE_NOT_AVAILABLE;
-    TEE_CloseObject(h);
+static TEE_Result check_counter(const struct counter_object *obj, size_t read) {
+    if (read != sizeof(*obj) || obj->magic != COUNTER_MAGIC || obj->armed > 1)
+        return tampered("the counter object is malformed");
     return TEE_SUCCESS;
 }
 
 /*
- * counter_state returns the counter, whether the device is armed, and
- * whether it has RPMB at all. An object that exists is RPMB. Without one,
- * the first call of the boot that finds RPMB writes a zero counter, unarmed,
- * which is what reading it would have given; no RPMB, or RPMB that cannot be
- * read, is a device without the counter. Once a device is armed, the latter
- * only fails the keys that need the counter.
+ * no_rpmb is the counter state of a device without usable RPMB: none, when
+ * that is allowed, else an error.
+ */
+static TEE_Result no_rpmb(TEE_Result res, bool *rpmb) {
+    if (FDE_V2_REQUIRE_RPMB || _rpmb_seen) {
+        EMSG("fde_key_handler: the counter in RPMB is not available: %#"PRIx32, res);
+        return TEE_ERROR_STORAGE_NOT_AVAILABLE;
+    }
+    *rpmb = false;
+    return TEE_SUCCESS;
+}
+
+/*
+ * counter_state returns the counter, whether the device is armed, and whether
+ * it has the counter at all. The first call that finds RPMB without the
+ * counter object creates it, zero and unarmed.
+ *
+ * Storage errors libutee does not pass on, TEE_ERROR_SECURITY for a MAC that
+ * does not match among them, panic the TA, which stays crashed until the
+ * reboot: they fail closed as well.
  */
 static TEE_Result counter_state(struct counter_object *obj, bool *rpmb) {
-    TEE_Result res = read_counter(obj);
+    TEE_ObjectHandle h = TEE_HANDLE_NULL;
+    TEE_Result res = TEE_ERROR_GENERIC;
+    size_t read = 0;
 
     *rpmb = false;
-    if (res == TEE_ERROR_STORAGE_NOT_AVAILABLE)
+    memset(obj, 0, sizeof(*obj));
+    obj->magic = COUNTER_MAGIC;
+    if (_rpmb_tampered)
+        return TEE_ERROR_SECURITY;
+
+    res = TEE_OpenPersistentObject(TEE_STORAGE_PRIVATE_RPMB, COUNTER_OBJECT_ID,
+                                   strlen(COUNTER_OBJECT_ID),
+                                   TEE_DATA_FLAG_ACCESS_READ, &h);
+    if (res == TEE_SUCCESS) {
+        res = TEE_ReadObjectData(h, obj, sizeof(*obj), &read);
+        TEE_CloseObject(h);
+        if (res)
+            return no_rpmb(res, rpmb);
+        res = check_counter(obj, read);
+        if (res)
+            return res;
+        _rpmb_seen = true;
+        *rpmb = true;
         return TEE_SUCCESS;
-    if (res == TEE_ERROR_ITEM_NOT_FOUND) {
-        if (write_counter(obj) != TEE_SUCCESS)
-            return TEE_SUCCESS;
-        res = TEE_SUCCESS;
     }
+    if (res == TEE_ERROR_CORRUPT_OBJECT) {
+        /* OP-TEE removes a corrupt object, the counter with it */
+        return tampered("the counter object is corrupt");
+    }
+    if (res != TEE_ERROR_ITEM_NOT_FOUND)
+        return no_rpmb(res, rpmb);
+    if (_rpmb_seen) {
+        /* it was there this boot, and nothing in this TA removes it */
+        return tampered("the counter object went away");
+    }
+
+    /* not there, or RPMB not usable, or the normal world says so */
+    res = TEE_CreatePersistentObject(TEE_STORAGE_PRIVATE_RPMB, COUNTER_OBJECT_ID,
+                                     strlen(COUNTER_OBJECT_ID),
+                                     TEE_DATA_FLAG_ACCESS_READ |
+                                     TEE_DATA_FLAG_ACCESS_WRITE,
+                                     TEE_HANDLE_NULL, obj, sizeof(*obj), &h);
+    if (res == TEE_ERROR_ACCESS_CONFLICT)
+        return tampered("the counter object was there after all");
     if (res)
-        return res;
+        return no_rpmb(res, rpmb);
+    TEE_CloseObject(h);
+    DMSG("fde_key_handler: created the counter in RPMB");
+    _rpmb_seen = true;
     *rpmb = true;
     return TEE_SUCCESS;
 }
 
-/* v1_handles_refused returns true once a v2 key was sealed with RPMB */
+/*
+ * update_counter writes the counter, and the armed flag, over the counter
+ * object as seen holds it. Neither goes back. The object is opened, read and
+ * compared to seen again, so a write never rests on a read that failed.
+ */
+static TEE_Result update_counter(const struct counter_object *seen,
+                                 uint64_t counter, bool arm) {
+    struct counter_object cur = { };
+    struct counter_object next = *seen;
+    TEE_ObjectHandle h = TEE_HANDLE_NULL;
+    TEE_Result res = TEE_ERROR_GENERIC;
+    size_t read = 0;
+
+    if (_rpmb_tampered)
+        return TEE_ERROR_SECURITY;
+    if (counter < seen->counter)
+        return TEE_ERROR_BAD_PARAMETERS;
+    next.counter = counter;
+    if (arm)
+        next.armed = 1;
+
+    res = TEE_OpenPersistentObject(TEE_STORAGE_PRIVATE_RPMB, COUNTER_OBJECT_ID,
+                                   strlen(COUNTER_OBJECT_ID),
+                                   TEE_DATA_FLAG_ACCESS_READ |
+                                   TEE_DATA_FLAG_ACCESS_WRITE, &h);
+    if (res == TEE_ERROR_ITEM_NOT_FOUND || res == TEE_ERROR_CORRUPT_OBJECT)
+        return tampered("the counter object went away");
+    if (res)
+        return TEE_ERROR_STORAGE_NOT_AVAILABLE;
+    res = TEE_ReadObjectData(h, &cur, sizeof(cur), &read);
+    if (res) {
+        res = TEE_ERROR_STORAGE_NOT_AVAILABLE;
+        goto out;
+    }
+    res = check_counter(&cur, read);
+    if (res)
+        goto out;
+    /* commands of a single instance TA do not interleave */
+    if (cur.counter != seen->counter || cur.armed != seen->armed) {
+        res = tampered("the counter changed under the TA");
+        goto out;
+    }
+    res = TEE_SeekObjectData(h, 0, TEE_DATA_SEEK_SET);
+    if (!res)
+        res = TEE_WriteObjectData(h, &next, sizeof(next));
+    if (res)
+        res = TEE_ERROR_STORAGE_NOT_AVAILABLE;
+out:
+    TEE_CloseObject(h);
+    return res;
+}
+
+/*
+ * v1_handles_refused returns true once a v2 key was sealed with RPMB, and
+ * whenever the counter cannot be told, which includes a build that requires
+ * RPMB finding none.
+ */
 bool v1_handles_refused(void) {
     struct counter_object obj;
     bool rpmb = false;
@@ -272,8 +377,7 @@ TEE_Result cmd_raise_counter(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
     }
     if (value == obj.counter)
         return TEE_SUCCESS;
-    obj.counter = value;
-    return write_counter(&obj);
+    return update_counter(&obj, value, false);
 }
 
 static void put_le64(uint8_t out[8], uint64_t v) {
@@ -422,8 +526,7 @@ TEE_Result cmd_key_encrypt_v2(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) 
 
     if (rpmb && !obj.armed) {
         /* from now on, keys sealed without the counter go */
-        obj.armed = 1;
-        res = write_counter(&obj);
+        res = update_counter(&obj, obj.counter, true);
         if (res)
             goto out;
     }
@@ -478,7 +581,7 @@ static TEE_Result open_v2(struct key_handle_v2 *handle, size_t handle_size,
             EMSG("fde_key_handler: the key was retired by the counter");
             return TEE_ERROR_ACCESS_DENIED;
         }
-    } else if (rpmb && obj.armed) {
+    } else if (FDE_V2_REQUIRE_RPMB || (rpmb && obj.armed)) {
         EMSG("fde_key_handler: the key was sealed without the counter");
         return TEE_ERROR_ACCESS_DENIED;
     }
@@ -644,8 +747,7 @@ TEE_Result cmd_key_reseal_v2(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
     if (res)
         goto out;
     if (rpmb && !obj.armed) {
-        obj.armed = 1;
-        res = write_counter(&obj);
+        res = update_counter(&obj, obj.counter, true);
         if (res)
             goto out;
     }
