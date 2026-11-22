@@ -31,6 +31,23 @@ typedef size_t tee_len_t;
 typedef uint32_t tee_len_t;
 #endif
 
+/*
+ * v2 (measured boot, RPMB counter, fde_key_handler_ta_v2.c) is only built
+ * where OP-TEE keeps a crashed TA crashed (TA_FLAG_INSTANCE_KEEP_CRASHED,
+ * OP-TEE 4.7 and newer). Older OP-TEE destroys a TA that panics and creates
+ * it again on the next session: the register empty and the lock released.
+ * The normal world can make the TA panic at will, e.g. with an RPMB error
+ * libutee does not pass on, so v2 there would be weaker than v1. Such a
+ * build is v1 only: the v2 commands are not supported, the v1 commands do
+ * not touch RPMB, and TA_CMD_TA_VERSION reports FDE_TA_VERSION_V1.
+ */
+#include <user_ta_header.h>
+#if defined(TA_FLAG_INSTANCE_KEEP_CRASHED)
+#define FDE_TA_V2 1
+#else
+#define FDE_TA_V2 0
+#endif
+
 #define TA_UNLOCKED  0
 #define TA_LOCKED    1
 

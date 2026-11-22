@@ -21,6 +21,8 @@
 /*
  * v2: keys sealed to a measured boot, retired by a counter in RPMB, see
  * fde_key_handler_ta_v2.c. A client that finds v1 has no rollback protection.
+ * A TA built against OP-TEE older than 4.7 is v1 only: it reports
+ * FDE_TA_VERSION_V1 and returns TEE_ERROR_NOT_SUPPORTED for the v2 commands.
  */
 #define FDE_TA_VERSION_V2   0x00020001
 

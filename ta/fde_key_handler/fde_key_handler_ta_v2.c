@@ -41,6 +41,8 @@
 #include "fde_key_handler_ta_type.h"
 #include "fde_key_handler_ta_handle.h"
 
+#if FDE_TA_V2
+
 #define V2_IV_SIZE      16
 #define V2_NONCE_SIZE   32
 #define V2_TAG_SIZE     16
@@ -766,3 +768,7 @@ out:
     TEE_Free(handle);
     return res;
 }
+
+#else /* !FDE_TA_V2 */
+#warning "OP-TEE without TA_FLAG_INSTANCE_KEEP_CRASHED (< 4.7): building a v1 only TA"
+#endif /* FDE_TA_V2 */

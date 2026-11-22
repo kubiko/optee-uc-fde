@@ -319,7 +319,7 @@ TEE_Result get_ta_version( uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
                                  TEE_PARAM_TYPE_NONE))
       return TEE_ERROR_BAD_PARAMETERS;
 
-    params[0].value.a = FDE_TA_VERSION_V2;
+    params[0].value.a = FDE_TA_V2 ? FDE_TA_VERSION_V2 : FDE_TA_VERSION_V1;
     return TEE_SUCCESS;
 }
 

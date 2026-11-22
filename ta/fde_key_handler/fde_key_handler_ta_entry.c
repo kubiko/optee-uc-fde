@@ -76,11 +76,13 @@ TEE_Result TA_InvokeCommandEntryPoint( void *session_context,
                 EMSG("fde_key_handler: TA is locked for further decrypt oprerations!!");
                 return TEE_ERROR_ACCESS_DENIED;
             }
+#if FDE_TA_V2
             // a device that sealed a v2 key with RPMB takes no v1 one
             if (v1_handles_refused()) {
                 EMSG("fde_key_handler: v1 keys are refused once a v2 key is sealed");
                 return TEE_ERROR_ACCESS_DENIED;
             }
+#endif
             return cmd_symmetric_key_crypto(TEE_MODE_DECRYPT, paramTypes, params);
         case TA_CMD_LOCK:
             return lock_ta(paramTypes, params);
@@ -90,6 +92,7 @@ TEE_Result TA_InvokeCommandEntryPoint( void *session_context,
             return generate_random(paramTypes, params);
         case TA_CMD_TA_VERSION:
             return get_ta_version(paramTypes, params);
+#if FDE_TA_V2
         case TA_CMD_EXTEND:
             return cmd_extend(paramTypes, params);
         case TA_CMD_GET_REGISTER:
@@ -109,6 +112,7 @@ TEE_Result TA_InvokeCommandEntryPoint( void *session_context,
         case TA_CMD_KEY_RESEAL_V2:
             // reveals nothing, so the running boot may reseal once locked
             return cmd_key_reseal_v2(paramTypes, params);
+#endif
         /* Asynchronous crypto functions */
         case TA_CMD_ASYMMETRIC_DERIVE_KEYPAIR:
             return cmd_asymmetric_derive_keypair(ctx, paramTypes, params);
