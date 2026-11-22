@@ -425,7 +425,8 @@ static uint64_t get_le64(const uint8_t in[8]) {
 
 /*
  * v2_crypto encrypts or decrypts a key under the key derived for the handle's
- * nonce, with everything of the handle but its tag as additional data.
+ * nonce, with everything of the handle but its tag as additional data. The
+ * derivation is labeled KDF_LABEL_V2, apart from the v1 and RSA ones.
  */
 static TEE_Result v2_crypto(TEE_OperationMode mode, struct key_handle_v2 *handle,
                             uint8_t *in, size_t in_size,
@@ -443,8 +444,8 @@ static TEE_Result v2_crypto(TEE_OperationMode mode, struct key_handle_v2 *handle
     res = TEE_AllocateOperation(&op, TEE_ALG_AES_GCM, mode, sizeof(derived) * 8);
     if (res)
         return res;
-    res = derive_ta_unique_key(derived, sizeof(derived), handle->nonce,
-                               sizeof(handle->nonce));
+    res = derive_ta_unique_key_labeled(derived, sizeof(derived), KDF_LABEL_V2,
+                                       handle->nonce, sizeof(handle->nonce));
     if (res)
         goto out_op;
     res = TEE_AllocateTransientObject(TEE_TYPE_AES, sizeof(derived) * 8, &hkey);

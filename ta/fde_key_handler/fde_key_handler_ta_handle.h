@@ -73,6 +73,16 @@ extern TEE_Result get_ta_version(uint32_t types,
 extern TEE_Result derive_ta_unique_key(uint8_t *key, uint16_t key_size,
                                        uint8_t *handle, uint32_t handle_size);
 
+/* derive_ta_unique_key() extra data labels, one per use but v1 */
+#define KDF_LABEL_V2        "uc-fde:v2"
+#define KDF_LABEL_RSA       "uc-fde:rsa"
+#define KDF_LABEL_MAX_LEN   16
+#define KDF_DATA_MAX_LEN    64
+extern TEE_Result derive_ta_unique_key_labeled(uint8_t *key, uint16_t key_size,
+                                               const char *label,
+                                               const uint8_t *data,
+                                               size_t data_len);
+
 /* v2, fde_key_handler_ta_v2.c */
 extern TEE_Result cmd_extend(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]);
 extern TEE_Result cmd_get_register(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]);

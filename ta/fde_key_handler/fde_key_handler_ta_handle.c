@@ -82,6 +82,35 @@ TEE_Result derive_ta_unique_key(uint8_t *key,
   return res;
 }
 
+/*
+ * derive_ta_unique_key_labeled derives a TA unique key for one use of it.
+ *
+ * v1 handles pass their bare 32 byte nonce as extra data, and keep doing so
+ * for the handles already deployed. Every other use passes
+ * label || '\0' || data, so that no two uses derive their keys from the
+ * same extra data, whatever data a caller chooses: a v2 key never equals
+ * the key an RSA seed binds to, nor a v1 one, which is exactly 32 bytes.
+ */
+TEE_Result derive_ta_unique_key_labeled(uint8_t *key, uint16_t key_size,
+                                        const char *label,
+                                        const uint8_t *data, size_t data_len) {
+    uint8_t extra[KDF_LABEL_MAX_LEN + 1 + KDF_DATA_MAX_LEN] = { };
+    size_t label_len = strlen(label);
+    size_t extra_len = label_len + 1 + data_len;
+    TEE_Result res = TEE_ERROR_GENERIC;
+
+    if (label_len > KDF_LABEL_MAX_LEN || data_len > KDF_DATA_MAX_LEN ||
+        (!data && data_len))
+        return TEE_ERROR_BAD_PARAMETERS;
+    memcpy(extra, label, label_len);
+    extra[label_len] = '\0';
+    if (data_len)
+        memcpy(extra + label_len + 1, data, data_len);
+    res = derive_ta_unique_key(key, key_size, extra, (uint32_t)extra_len);
+    memzero_explicit(extra, sizeof(extra));
+    return res;
+}
+
 static TEE_Result do_key_encrypt( TEE_OperationHandle crypto_op,
                                   uint8_t *key, size_t key_sz,
                                   uint8_t *enc_key, size_t *enc_key_sz,
@@ -649,11 +678,18 @@ out:
  */
 #define HUK_BOUND_SEED_LEN  32u
 
+_Static_assert(SEED_MAX_LEN <= KDF_DATA_MAX_LEN,
+               "an RSA seed must fit the labeled derivation");
+_Static_assert(KDF_LABEL_MAX_LEN + 1 + KDF_DATA_MAX_LEN <=
+               TA_DERIVED_EXTRA_DATA_MAX_SIZE,
+               "labeled extra data must fit PTA_SYSTEM_DERIVE_TA_UNIQUE_KEY");
+
 static TEE_Result derive_huk_bound_seed(const uint8_t *seed, size_t seed_len,
                                         uint8_t bound[HUK_BOUND_SEED_LEN])
 {
-    return derive_ta_unique_key(bound, HUK_BOUND_SEED_LEN,
-                                (uint8_t *)seed, (uint32_t)seed_len);
+    /* labeled, so a seed can never select the key of a v1 or v2 handle */
+    return derive_ta_unique_key_labeled(bound, HUK_BOUND_SEED_LEN,
+                                        KDF_LABEL_RSA, seed, seed_len);
 }
 
 /*
