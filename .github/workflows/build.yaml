@@ -81,3 +81,37 @@ jobs:
             TA_DEV_KIT_DIR="$GITHUB_WORKSPACE/optee/out/arm-plat-vexpress/export-ta_arm32" \
             CROSS_COMPILE="$CROSS_COMPILE_TA"
           test -f optee-uc-fde/out/ta_arm32/ta/fde_key_handler/fd1b2a86-3668-11eb-adc1-0242ac120002.ta
+
+  build-host-rpi:
+    name: build-host (Raspberry Pi backend, Ubuntu ${{ matrix.ubuntu }})
+    # native arm64 runner: the backend links against arm64 libcrypto/json-c
+    runs-on: ubuntu-${{ matrix.ubuntu }}-arm
+    strategy:
+      matrix:
+        ubuntu:
+          - "24.04"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          path: optee-uc-fde
+          persist-credentials: false
+      - name: Install build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libjson-c-dev libssl-dev \
+            jq python3-cryptography
+      - name: Build host binaries (rpi backend)
+        env:
+          # passed via the environment: a command line CFLAGS would override
+          # the Makefile's own CFLAGS (backend define, include paths)
+          CFLAGS: -Wall -Wextra
+        run: |
+          make -C optee-uc-fde/host/fde_key_manager --no-builtin-variables \
+            O="$GITHUB_WORKSPACE/out/rpi" BACKEND=rpi all
+          test -x out/rpi/fde_key_manager/fde-setup
+          test -x out/rpi/fde_key_manager/fde-reveal-key
+      - name: Test against firmware mailbox emulator
+        run: optee-uc-fde/tests/rpi-backend/run.sh out/rpi/fde_key_manager
