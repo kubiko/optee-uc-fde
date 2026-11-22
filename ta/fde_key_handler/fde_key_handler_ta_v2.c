@@ -382,6 +382,32 @@ TEE_Result cmd_raise_counter(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
     return update_counter(&obj, value, false);
 }
 
+/*
+ * A key is sealed at most FDE_V2_COUNTER_WINDOW above the counter in RPMB: a
+ * refresh seals the slot it tries at the next counter, and the commit raises
+ * the counter to it. Without the cap, a normal world that once ran as root
+ * could reseal keys, which works once the TA is locked, at a counter no raise
+ * ever reaches, to a boot of its own, and keep them past the fix that raises
+ * the counter. With it, such a key is retired by the second raise.
+ */
+#define FDE_V2_COUNTER_WINDOW 1
+
+static TEE_Result check_seal_counter(const struct counter_object *obj, bool rpmb,
+                                     uint64_t counter) {
+    if (!rpmb)
+        return TEE_SUCCESS;
+    if (counter < obj->counter) {
+        EMSG("fde_key_handler: refusing to seal below the counter");
+        return TEE_ERROR_BAD_PARAMETERS;
+    }
+    if (counter - obj->counter > FDE_V2_COUNTER_WINDOW) {
+        EMSG("fde_key_handler: refusing to seal more than %d above the counter",
+             FDE_V2_COUNTER_WINDOW);
+        return TEE_ERROR_BAD_PARAMETERS;
+    }
+    return TEE_SUCCESS;
+}
+
 static void put_le64(uint8_t out[8], uint64_t v) {
     for (int i = 0; i < 8; i++)
         out[i] = (uint8_t)(v >> (8 * i));
@@ -465,6 +491,7 @@ out_op:
  *   params[2] memref output: the handle, V2_HANDLE_SIZE(values)
  *   params[3] memref output: the sealed key, the size of the key
  * A counter below the one in RPMB is refused: such a key would never unseal.
+ * So is one more than FDE_V2_COUNTER_WINDOW above it.
  */
 TEE_Result cmd_key_encrypt_v2(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
     struct counter_object obj;
@@ -504,10 +531,9 @@ TEE_Result cmd_key_encrypt_v2(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) 
     res = counter_state(&obj, &rpmb);
     if (res)
         return res;
-    if (rpmb && counter < obj.counter) {
-        EMSG("fde_key_handler: refusing to seal below the counter");
-        return TEE_ERROR_BAD_PARAMETERS;
-    }
+    res = check_seal_counter(&obj, rpmb, counter);
+    if (res)
+        return res;
 
     handle = TEE_Malloc(handle_size, TEE_MALLOC_FILL_ZERO);
     if (!handle)
@@ -674,7 +700,8 @@ out:
  * counter, without revealing it: the running boot has to be one the old handle
  * unseals for, now or earlier in the boot, so this works once the TA is locked,
  * as a reseal of a refresh needs, and after the register was extended past the
- * value the key unsealed at. The new counter is not below the one in RPMB.
+ * value the key unsealed at. The new counter is not below the one in RPMB, nor
+ * more than FDE_V2_COUNTER_WINDOW above it.
  *   params[0] memref input:  the sealed key
  *   params[1] memref input:  the handle
  *   params[2] memref input:  the new policy, as for TA_CMD_KEY_ENCRYPT_V2
@@ -732,11 +759,9 @@ TEE_Result cmd_key_reseal_v2(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
     res = counter_state(&obj, &rpmb);
     if (res)
         goto out;
-    if (rpmb && counter < obj.counter) {
-        EMSG("fde_key_handler: refusing to seal below the counter");
-        res = TEE_ERROR_BAD_PARAMETERS;
+    res = check_seal_counter(&obj, rpmb, counter);
+    if (res)
         goto out;
-    }
     fresh->version = V2_HANDLE_VERSION;
     fresh->flags = rpmb ? V2_FLAG_COUNTER : 0;
     fresh->n_values = (uint8_t)n;
