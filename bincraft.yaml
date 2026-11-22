@@ -37,6 +37,8 @@ parts:
     build-environment:
       - TA: "fd1b2a86-3668-11eb-adc1-0242ac120002.ta"
       - TA_DEV_KIT_DIR: "${CRAFT_STAGE}/optee/export-ta_arm64"
+      # the QEMU OP-TEE below has no RPMB: development build of the TA
+      - CFG_FDE_V2_REQUIRE_RPMB: "n"
       - LDFLAGS: "--no-warn-rwx-segments --no-warn-execstack"
       - on arm64:
           - CROSS_COMPILE: ""

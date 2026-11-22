@@ -24,10 +24,11 @@
  * lower value. A device that sealed a v2 key with RPMB is "armed": it refuses
  * v1 handles and v2 handles sealed without the counter from then on.
  *
- * Without RPMB secure storage (CFG_RPMB_FS=n, or no RPMB key programmed on an
- * open board) keys are sealed and unsealed without the counter, the register
- * still enforced, unless the TA is built with CFG_FDE_V2_REQUIRE_RPMB=y, see
- * counter_state.
+ * By default (CFG_FDE_V2_REQUIRE_RPMB=y) the counter is required. A development
+ * build for a device without RPMB secure storage (CFG_RPMB_FS=n, or no RPMB
+ * key programmed on an open board) sets CFG_FDE_V2_REQUIRE_RPMB=n: keys are
+ * then sealed and unsealed without the counter, the register still enforced,
+ * see counter_state.
  */
 
 #include <pta_system.h>
@@ -164,17 +165,18 @@ TEE_Result cmd_get_register(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
  *    only when it holds what the caller read;
  *  - a counter that was there this boot cannot go away before the reboot.
  *
- * With FDE_V2_REQUIRE_RPMB, a production build for a device whose RPMB key
+ * With FDE_V2_REQUIRE_RPMB, the default, for a device whose RPMB key
  * is provisioned, RPMB that cannot be used fails every call that needs the
  * counter, a v1 unseal included, and v2 keys sealed without the counter are
  * refused. v1 keys still unseal until the first v2 seal arms the device, so a
  * v1 install can move its keys to v2. Without it, a device with no usable
  * RPMB from the start of the boot seals and unseals without the counter,
  * which a normal world that blocks RPMB from the start of the boot gets as
- * well: the downgrade a development build accepts.
+ * well: the downgrade a development build (CFG_FDE_V2_REQUIRE_RPMB=n) accepts.
  */
+/* sub.mk always sets it; fail safe if the file is built some other way */
 #ifndef FDE_V2_REQUIRE_RPMB
-#define FDE_V2_REQUIRE_RPMB 0
+#define FDE_V2_REQUIRE_RPMB 1
 #endif
 
 /* the counter was read or written this boot */
