@@ -22,28 +22,6 @@
 #define TAG_SIZE        16
 #define KEY_HANDLE_VERSION 'U'
 
-/*
- * The GP TEE Internal Core API 1.3.1 changed the type of all buffer length
- * parameters (e.g. TEE_AEEncryptFinal() destLen/tagLen, TEE_MACComputeFinal()
- * macLen, TEE_DigestDoFinal() hashLen, TEE_AsymmetricSignDigest()
- * signatureLen, TEE_GetObjectBufferAttribute() size,
- * TEE_BigIntConvertToOctetString() bufferLen) and of TEE_Param memref.size
- * from uint32_t to size_t. Select a matching local length type so the TA
- * builds against any supported OP-TEE version:
- *   - OP-TEE 3.x (Core API 1.1) expects uint32_t.
- *   - OP-TEE 4.x uses size_t by default; compatibility mode selects the
- *     legacy uint32_t (__GP11) variant.
- * Select size_t only when Core API 1.3.1 or newer is exposed without compat.
- * Use tee_len_t for every variable whose address is passed to the GP API.
- */
-#if defined(TEE_CORE_API_VERSION) && TEE_CORE_API_VERSION >= 0x01030100 && \
-    defined(__OPTEE_CORE_API_COMPAT_1_1) && \
-    !__OPTEE_CORE_API_COMPAT_1_1
-typedef size_t tee_len_t;
-#else
-typedef uint32_t tee_len_t;
-#endif
-
 // Trusted Key Handle
 struct key_handle {
     uint8_t version; // reserved to recognise the version

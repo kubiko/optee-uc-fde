@@ -91,7 +91,7 @@ static TEE_Result sha256(const void *a, size_t a_len, const void *b,
                          size_t b_len, uint8_t out[REGISTER_SIZE]) {
     TEE_OperationHandle op = TEE_HANDLE_NULL;
     TEE_Result res = TEE_ERROR_GENERIC;
-    size_t out_len = REGISTER_SIZE;
+    tee_len_t out_len = REGISTER_SIZE;
 
     res = TEE_AllocateOperation(&op, TEE_ALG_SHA256, TEE_MODE_DIGEST, 0);
     if (res)
@@ -186,7 +186,7 @@ static TEE_Result tampered(const char *what) {
     return TEE_ERROR_SECURITY;
 }
 
-static TEE_Result check_counter(const struct counter_object *obj, size_t read) {
+static TEE_Result check_counter(const struct counter_object *obj, tee_len_t read) {
     if (read != sizeof(*obj) || obj->magic != COUNTER_MAGIC || obj->armed > 1)
         return tampered("the counter object is malformed");
     return TEE_SUCCESS;
@@ -217,7 +217,7 @@ static TEE_Result no_rpmb(TEE_Result res, bool *rpmb) {
 static TEE_Result counter_state(struct counter_object *obj, bool *rpmb) {
     TEE_ObjectHandle h = TEE_HANDLE_NULL;
     TEE_Result res = TEE_ERROR_GENERIC;
-    size_t read = 0;
+    tee_len_t read = 0;
 
     *rpmb = false;
     memset(obj, 0, sizeof(*obj));
@@ -279,7 +279,7 @@ static TEE_Result update_counter(const struct counter_object *seen,
     struct counter_object next = *seen;
     TEE_ObjectHandle h = TEE_HANDLE_NULL;
     TEE_Result res = TEE_ERROR_GENERIC;
-    size_t read = 0;
+    tee_len_t read = 0;
 
     if (_rpmb_tampered)
         return TEE_ERROR_SECURITY;
@@ -406,7 +406,8 @@ static TEE_Result v2_crypto(TEE_OperationMode mode, struct key_handle_v2 *handle
     TEE_Attribute attr = { };
     TEE_Result res = TEE_ERROR_GENERIC;
     uint8_t tag[V2_TAG_SIZE] = { };
-    size_t tag_len = V2_TAG_SIZE;
+    tee_len_t tag_len = V2_TAG_SIZE;
+    tee_len_t out_len = *out_size;
     size_t aad_head = offsetof(struct key_handle_v2, tag);
 
     res = TEE_AllocateOperation(&op, TEE_ALG_AES_GCM, mode, sizeof(derived) * 8);
@@ -435,15 +436,16 @@ static TEE_Result v2_crypto(TEE_OperationMode mode, struct key_handle_v2 *handle
     TEE_AEUpdateAAD(op, (uint8_t *)handle + sizeof(*handle),
                     (size_t)handle->n_values * REGISTER_SIZE);
     if (mode == TEE_MODE_ENCRYPT) {
-        res = TEE_AEEncryptFinal(op, in, in_size, out, out_size, handle->tag, &tag_len);
-        if (!res && (tag_len != V2_TAG_SIZE || *out_size != in_size))
+        res = TEE_AEEncryptFinal(op, in, in_size, out, &out_len, handle->tag, &tag_len);
+        if (!res && (tag_len != V2_TAG_SIZE || out_len != in_size))
             res = TEE_ERROR_SECURITY;
     } else {
         memcpy(tag, handle->tag, V2_TAG_SIZE);
-        res = TEE_AEDecryptFinal(op, in, in_size, out, out_size, tag, V2_TAG_SIZE);
-        if (!res && *out_size != in_size)
+        res = TEE_AEDecryptFinal(op, in, in_size, out, &out_len, tag, V2_TAG_SIZE);
+        if (!res && out_len != in_size)
             res = TEE_ERROR_SECURITY;
     }
+    *out_size = out_len;
 
 out_key:
     TEE_FreeTransientObject(hkey);
