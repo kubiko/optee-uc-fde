@@ -7,7 +7,10 @@
  * The front-end (fde_key_manager.c) implements the Ubuntu Core FDE hook
  * protocol (fde-setup / fde-reveal-key) and is backend independent. A backend
  * provides the sealing primitives below:
- *   - OP-TEE backend: fde_key_manager_ca.c, talks to the fde_key_handler TA.
+ *   - OP-TEE backend (default): fde_key_manager_ca.c, talks to the
+ *     fde_key_handler TA.
+ *   - Raspberry Pi backend (FDE_BACKEND_RPI): rpi_fde_backend.c, uses the
+ *     VideoCore firmware crypto service keyed by the OTP device private key.
  *
  * All functions returning uint32_t return 0 on success and a backend
  * specific non-zero error code on failure.
@@ -19,7 +22,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#if defined(FDE_BACKEND_RPI)
+#include "rpi_fde_backend.h"
+#else
 #include "fde_key_handler_ta_type.h"
+#endif
 
 /*
  * Backend provided constants:
