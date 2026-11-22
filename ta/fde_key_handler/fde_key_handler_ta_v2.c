@@ -131,7 +131,9 @@ TEE_Result cmd_extend(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
     }
     if (_extends < REGISTER_HISTORY)
         memcpy(_history[_extends], _register, REGISTER_SIZE);
-    _extends++;
+    /* saturate: a wrapped count would write the history again */
+    if (_extends < UINT32_MAX)
+        _extends++;
     DMSG("fde_key_handler: register extended, %"PRIu32" events", _extends);
     return TEE_SUCCESS;
 }
