@@ -9,11 +9,8 @@
 #include <libgen.h>
 #include <unistd.h>
 
-#include <tee_client_api.h>
-
 #include <json-c/json.h>
 
-#include "fde_key_handler_ta_type.h"
 #include "fde_key_manager_ca.h"
 
 #define MAX_JSON_BUF_SIZE   (1024 * 10)
@@ -54,6 +51,7 @@ static void print_help(void)
     printf("\t\tby default 128bytes buffer is generated unless size is passed\n");
     printf("\t--encrypt-decrypt-selftest: encrypt and decrypt selftest\n");
     printf("\t--get-ta-version: pring TA version.\n");
+    backend_print_help();
 }
 
 char *get_snap_hook_fde_setup_request(void) {
@@ -667,14 +665,14 @@ int main(int argc, char *argv[]) {
      */
     if (!strcmp("--ta-lock-status", argv[1])) {
         ret = get_ta_lock(&lock);
-        if(ret == TEEC_SUCCESS) {
+        if(ret == 0) {
             printf("Lock status: %s\n", lock ? "LOCKED":"UNLOCKED");
         } else {
             printf("TA operation fail, ret 0x%x\n", ret);
         }
     } else if (!strcmp("--lock-ta", argv[1])) {
         ret = lock_ta();
-        if(ret == TEEC_SUCCESS) {
+        if(ret == 0) {
             printf("TA is now locked\n");
         } else {
             printf("TA operation fail, ret 0x%x\n", ret);
@@ -701,18 +699,20 @@ int main(int argc, char *argv[]) {
         }
     } else if (!strcmp("--encrypt-decrypt-selftest", argv[1])) {
         ret = encrypt_decrypt_selftest();
-        if(ret != TEEC_SUCCESS) {
+        if(ret != 0) {
             printf("Failed to pass encrypt and decrypt selftest, ret 0x%x\n", ret);
         }
     } else if (!strcmp("--get-ta-version", argv[1])) {
         ret = get_ta_version(&ta_version);
-        if(ret == TEEC_SUCCESS) {
+        if(ret == 0) {
             printf("TA version: 0x%X\n", ta_version);
         } else {
             printf("Failed to get TA version, ret 0x%x\n", ret);
         }
     } else if (!strcmp("--help", argv[1])) {
         print_help();
+    } else if (backend_handle_cli(argc, argv, &ret)) {
+        // handled by backend specific option
     } else {
         printf("error: NOT supported option(%s).\n", argv[1]);
         print_help();

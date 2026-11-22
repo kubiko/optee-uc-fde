@@ -20,7 +20,7 @@ OBJCOPY		?= $(CROSS_COMPILE)objcopy
 OBJDUMP		?= $(CROSS_COMPILE)objdump
 READELF		?= $(CROSS_COMPILE)readelf
 
-srcs		:= fde_key_manager_ca.c base64.c
+srcs		:= fde_key_manager_ca.c fde_key_manager_common.c base64.c
 srcs_key	:= $(srcs) fde_key_manager.c
 
 objs_key 	:= $(patsubst %.c,$(out-dir)/fde_key_manager/%.o, $(srcs_key))
