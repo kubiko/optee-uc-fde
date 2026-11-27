@@ -144,7 +144,7 @@ TEE_Result cmd_get_register(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
                                  TEE_PARAM_TYPE_NONE,
                                  TEE_PARAM_TYPE_NONE))
         return TEE_ERROR_BAD_PARAMETERS;
-    if (params[0].memref.size < REGISTER_SIZE) {
+    if (!params[0].memref.buffer || params[0].memref.size < REGISTER_SIZE) {
         params[0].memref.size = REGISTER_SIZE;
         return TEE_ERROR_SHORT_BUFFER;
     }
@@ -526,7 +526,8 @@ TEE_Result cmd_key_encrypt_v2(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) 
     if (n > MAX_REGISTER_VALUES)
         return TEE_ERROR_BAD_PARAMETERS;
     handle_size = V2_HANDLE_SIZE(n);
-    if (params[2].memref.size < handle_size || params[3].memref.size < params[0].memref.size) {
+    if (!params[2].memref.buffer || params[2].memref.size < handle_size ||
+        !params[3].memref.buffer || params[3].memref.size < params[0].memref.size) {
         params[2].memref.size = handle_size;
         params[3].memref.size = params[0].memref.size;
         return TEE_ERROR_SHORT_BUFFER;
@@ -673,7 +674,7 @@ TEE_Result cmd_key_decrypt_v2(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) 
     sealed_size = params[0].memref.size;
     if (!params[0].memref.buffer || !sealed_size || sealed_size > MAX_BUF_SIZE)
         return TEE_ERROR_BAD_PARAMETERS;
-    if (params[2].memref.size < sealed_size) {
+    if (!params[2].memref.buffer || params[2].memref.size < sealed_size) {
         params[2].memref.size = sealed_size;
         return TEE_ERROR_SHORT_BUFFER;
     }
@@ -740,7 +741,7 @@ TEE_Result cmd_key_reseal_v2(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
     if (n > MAX_REGISTER_VALUES)
         return TEE_ERROR_BAD_PARAMETERS;
     fresh_size = V2_HANDLE_SIZE(n);
-    if (params[3].memref.size < fresh_size + sealed_size) {
+    if (!params[3].memref.buffer || params[3].memref.size < fresh_size + sealed_size) {
         params[3].memref.size = fresh_size + sealed_size;
         return TEE_ERROR_SHORT_BUFFER;
     }
