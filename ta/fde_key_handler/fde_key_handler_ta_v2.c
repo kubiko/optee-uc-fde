@@ -360,6 +360,21 @@ TEE_Result cmd_get_counter(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
     return TEE_SUCCESS;
 }
 
+/*
+ * A key is sealed at most FDE_V2_COUNTER_WINDOW above the counter in RPMB: a
+ * refresh seals the slot it tries at the next counter, and the commit raises
+ * the counter to it. Without the cap, a normal world that once ran as root
+ * could reseal keys, which works once the TA is locked, at a counter no raise
+ * ever reaches, to a boot of its own, and keep them past the fix that raises
+ * the counter. With it, such a key is retired by the second raise.
+ *
+ * The counter is raised by at most as much, to where a key may be sealed: a
+ * normal world that raised it at will could take it to UINT64_MAX, where no
+ * reseal at the counter plus one is possible again, even after a factory
+ * reset.
+ */
+#define FDE_V2_COUNTER_WINDOW 1
+
 TEE_Result cmd_raise_counter(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
     struct counter_object obj;
     TEE_Result res = TEE_ERROR_GENERIC;
@@ -383,18 +398,13 @@ TEE_Result cmd_raise_counter(uint32_t types, TEE_Param params[TEE_NUM_PARAMS]) {
     }
     if (value == obj.counter)
         return TEE_SUCCESS;
+    if (value - obj.counter > FDE_V2_COUNTER_WINDOW) {
+        EMSG("fde_key_handler: the counter goes up by at most %d",
+             FDE_V2_COUNTER_WINDOW);
+        return TEE_ERROR_BAD_PARAMETERS;
+    }
     return update_counter(&obj, value, false);
 }
-
-/*
- * A key is sealed at most FDE_V2_COUNTER_WINDOW above the counter in RPMB: a
- * refresh seals the slot it tries at the next counter, and the commit raises
- * the counter to it. Without the cap, a normal world that once ran as root
- * could reseal keys, which works once the TA is locked, at a counter no raise
- * ever reaches, to a boot of its own, and keep them past the fix that raises
- * the counter. With it, such a key is retired by the second raise.
- */
-#define FDE_V2_COUNTER_WINDOW 1
 
 static TEE_Result check_seal_counter(const struct counter_object *obj, bool rpmb,
                                      uint64_t counter) {
